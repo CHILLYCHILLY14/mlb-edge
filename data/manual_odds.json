@@ -1,0 +1,11 @@
+{
+  "_README": [
+    "Optional. ESPN does not publish first-five prices, so paste them here and the model",
+    "prices F5 exactly like any other market. Key each entry by gamePk (shown in the feed).",
+    "Anything you leave out is simply skipped - the model still publishes a fair F5 line.",
+    "Delete the example below or leave it; unknown gamePks are ignored."
+  ],
+  "_example_823746": {
+    "f5": { "ml_away": 105, "ml_home": -125, "total": 4.5, "over": -115, "under": -105, "book": "DraftKings" }
+  }
+}

@@ -1,0 +1,95 @@
+name: Build MLB slate
+
+on:
+  schedule:
+    # UTC. Covers the whole MLB day: morning card, midday line moves, the
+    # window when lineups post, first pitch, late west-coast games, and an
+    # overnight pass that grades everything that finished.
+    - cron: "0 11 * * *"    #  7:00 AM ET  - first build of the day
+    - cron: "0 15 * * *"    # 11:00 AM ET
+    - cron: "0 18 * * *"    #  2:00 PM ET
+    - cron: "30 20 * * *"   #  4:30 PM ET  - lineups start posting
+    - cron: "0 22 * * *"    #  6:00 PM ET  - close to first pitch
+    - cron: "30 23 * * *"   #  7:30 PM ET
+    - cron: "0 2 * * *"     # 10:00 PM ET  - late slate
+    - cron: "0 8 * * *"     #  4:00 AM ET  - grade yesterday
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Slate date (YYYY-MM-DD, blank = today)"
+        required: false
+      days:
+        description: "How many days to build"
+        required: false
+        default: "2"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: mlb-edge
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore upstream cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: mlb-cache-${{ github.run_id }}
+          restore-keys: mlb-cache-
+
+      - name: Self-test (pipeline)
+        run: python -m tests.test_pipeline
+
+      - name: Self-test (dashboard ledger)
+        run: node tests/test_ledger.mjs
+
+      - name: Build slate
+        env:
+          MLB_BANKROLL: ${{ vars.MLB_BANKROLL || '250' }}
+          MLB_SEASON: ${{ vars.MLB_SEASON || '2026' }}
+        run: |
+          python -m pipeline.build \
+            ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }} \
+            --days ${{ github.event.inputs.days || '2' }}
+
+      - name: Grade yesterday
+        run: python -m pipeline.build --date $(date -u -d 'yesterday' +%F) --days 1 || true
+
+      - name: Commit feed and ledger
+        run: |
+          git config user.name  "mlb-edge-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A docs/data data/shadow.json
+          if git diff --staged --quiet; then
+            echo "nothing changed"
+          else
+            git commit -m "slate: $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git pull --rebase --autostash origin ${{ github.ref_name }} || true
+            git push
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}

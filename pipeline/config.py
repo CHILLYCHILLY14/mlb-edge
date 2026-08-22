@@ -1,0 +1,106 @@
+"""
+MLB Edge - central configuration.
+
+Everything tunable lives here. Nothing else in the pipeline hard-codes a knob.
+"""
+from __future__ import annotations
+import os
+
+# ---------------------------------------------------------------- bankroll ---
+BANKROLL          = float(os.environ.get("MLB_BANKROLL", 250.0))
+KELLY_FRACTION    = 0.25    # fractional Kelly multiplier
+MAX_STAKE_PCT     = 0.05    # hard cap: 5% of bankroll on any single bet
+MIN_STAKE         = 1.00    # do not record a bet smaller than this
+STAKE_ROUNDING    = 0.50    # round stakes to nearest $0.50
+
+# ------------------------------------------------------------------ market ---
+# How much of the model-vs-market disagreement we keep. 0.40 market weight means
+# we keep 60% of our disagreement with the no-vig market price. MLB moneyline
+# markets are the most efficient in US sports, so we anchor harder than NFL.
+MARKET_BLEND      = 0.40
+TOTALS_BLEND      = 0.45    # totals markets are sharper still
+F5_BLEND          = 0.30    # first-5 markets are thinner => model gets more say
+
+# Edge compression. Raw EV is squashed through tanh toward a hard ceiling so a
+# noisy 22% "edge" becomes a believable one. Kelly is sized off the COMPRESSED
+# number, never the raw one.
+EDGE_CEILING      = 0.055   # moneyline / run line
+EDGE_CEILING_TOT  = 0.045   # totals
+MAX_MODEL_PROB    = 0.80    # cap modeled win prob before staking
+
+# ------------------------------------------------------------------- tiers ---
+TIER_BEST         = 0.035
+TIER_GOOD         = 0.025
+TIER_LEAN         = 0.012
+
+# BEST BET lock rules - all must pass
+LOCK_MIN_PRICE    = -175    # no heavier chalk than this
+LOCK_MAX_PRICE    =  160    # no bigger dog than this
+LOCK_MIN_PROB_GAP = 0.035   # must actually disagree with the market
+LOCK_MAX_PROB_GAP = 0.120   # ...but not absurdly (that means bad data)
+LOCK_MAX_ODDS_AGE_H = 6.0   # odds must be fresher than this
+LOCK_MAX_SIM_SE   = 0.0040  # Monte Carlo standard error ceiling
+LOCK_REQUIRE_BOTH_SP = True # both probable starters must be named
+LOCK_MAX_PRECIP   = 0.60    # skip likely rainouts
+LOCK_MIN_TOTAL_GAP = 0.50   # totals: model must be >= this far from market
+LOCK_MAX_TOTAL_GAP = 2.50   # ...and no further than this
+
+# --------------------------------------------------------------- simulator ---
+N_SIMS            = 20000   # Monte Carlo trials per game
+N_SIMS_RATINGS    = 6000    # trials per team for neutral-site power ratings
+RANDOM_SEED       = 20260101
+
+# Shrinkage priors (regress a player's rates toward league average).
+PRIOR_PA_BATTER   = 200     # plate appearances of league-average prior
+PRIOR_TBF_SP      = 250     # batters faced prior for starters
+PRIOR_TBF_RP      = 130     # batters faced prior for relievers
+MIN_PA_LINEUP     = 40      # ignore bench scrubs when projecting a lineup
+
+# Starter workload: batters faced before the bullpen takes over.
+SP_BF_SD          = 4.5     # game-to-game noise in starter length
+SP_BF_MIN         = 9
+SP_BF_MAX         = 30
+SP_BF_DEFAULT     = 22.5    # if we have no history for this starter
+
+# Third-time-through-the-order penalty applied to a starter's rates.
+TTO_PENALTY       = 0.045   # ~4.5% worse on the third pass
+
+# Platoon (batter hand vs pitcher hand). Modest, generic, applied to rates.
+PLATOON_ADV       = 0.035   # opposite hand: batter this much better
+PLATOON_DIS       = 0.030   # same hand: batter this much worse
+
+# ----------------------------------------------------------------- weather ---
+WEATHER_WEIGHT    = 0.60    # fraction of the computed weather effect we apply
+WEATHER_CAP       = 0.12    # +/- 12% run-environment swing, hard cap
+TEMP_PER_F        = 0.0060  # run env per degree F away from 70
+WIND_OUT_PER_MPH  = 0.0120  # run env per mph blowing out to center
+WIND_IN_PER_MPH   = 0.0100  # run env per mph blowing in from center
+HUMID_PER_10PCT   = 0.0020
+ROOF_CLOSE_TEMP_F = 60.0    # retractable roofs assumed shut below this
+ROOF_CLOSE_HOT_F  = 95.0    # ...and above this
+ROOF_CLOSE_PRECIP = 0.50    # ...and when rain is likely
+
+# -------------------------------------------------------------------- misc ---
+SEASON            = int(os.environ.get("MLB_SEASON", 2026))
+TZ_DISPLAY        = "America/New_York"
+DATA_DIR          = os.environ.get("MLB_DATA_DIR", "data")
+DOCS_DATA_DIR     = os.environ.get("MLB_DOCS_DATA_DIR", "docs/data")
+HTTP_TIMEOUT      = 25
+HTTP_RETRIES      = 3
+CACHE_TTL_STATS_H = 8.0     # season stats change slowly; cache them
+
+# ------------------------------------------------------------- home field ---
+# Applied as a symmetric offensive nudge (home +x, away -x on hit/HR rates).
+# Calibrated so two identical teams produce a ~53.2% home win rate, which is
+# where MLB has actually sat in recent seasons, while leaving the total alone.
+HOME_FIELD_ADV    = 0.018
+
+# ------------------------------------------------------------- portfolio ---
+# The workbook audit showed the damage came from stake size and correlation,
+# not from picking losers: a 55% win rate with a -24% ROI is a staking problem.
+# These three rules exist to make that arithmetic impossible to repeat.
+MAX_BEST_BETS_PER_SLATE = 3     # a real edge is rare; eight a night is a bug
+MAX_PLAYS_PER_SLATE     = 6     # total staked positions in one day
+MAX_SLATE_EXPOSURE_PCT  = 0.15  # total money at risk across the whole slate
+ONE_SIDE_BET_PER_GAME   = True  # never stake both the ML and the run line
+DIVERGENCE_FLAG_RATIO   = 0.40  # if >40% of the slate screams edge, distrust it
