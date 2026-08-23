@@ -81,6 +81,9 @@ jobs:
       - name: Self-test (scheduled build runner)
         run: bash tests/test_build_runner.sh
 
+      - name: Self-test (repository settings)
+        run: python -m tests.test_config
+
       - name: Self-test (browser simulator matches the build engine)
         run: node tests/test_sim.mjs docs/data || true
 
