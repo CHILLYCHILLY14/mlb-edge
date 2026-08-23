@@ -7,7 +7,7 @@ moneyline, run line, total and first five; sizes bets with fractional Kelly unde
 hard portfolio limits; and grades every call it makes — including the ones it
 passed on.
 
-It runs itself on GitHub Actions eight times a day, publishes a JSON feed and a
+It runs itself on GitHub Actions nine times a day, publishes a JSON feed and a
 dashboard to GitHub Pages, and embeds into a Wix site with an iframe. No paid
 API keys, no server, no monthly bill.
 
@@ -113,6 +113,8 @@ market blend, weather weights, portfolio limits — lives in `pipeline/config.py
 pip install -r requirements.txt
 python -m tests.test_pipeline        # full offline self-test, no network
 node tests/test_ledger.mjs           # the dashboard's settlement rules
+node tests/test_schedule.mjs         # date resolution and refresh logic
+node tests/test_sim.mjs docs/data   # browser engine vs the build engine
 python -m tests.test_layout preview.html   # phone layout guards (needs playwright)
 python -m pipeline.build             # today
 python -m pipeline.build --date 2026-08-21 --days 3
@@ -231,6 +233,33 @@ in `config.py`.
 - **Team defense.** Defensive efficiency, the share of balls in play a club turns
   into outs, adjusts hits on contact.
 
+**The simulator runs in the page.** `docs/sim.js` is a port of the build's
+Monte Carlo engine, so the **Simulator** tab replays any game in your browser
+with the inputs exposed: swap in a sharper starter, pull him three batters
+earlier, sit the leadoff man, turn the wind around, dial the park up or down.
+Every number is shown as a change from what the build published, with the
+sampling noise stated so you can tell a real move from a rounding wobble.
+
+The two engines are held together by `tests/test_sim.mjs`, which replays every
+published game through the JavaScript one and fails if it drifts off Python's
+numbers — two hand-written implementations of the same game is exactly the
+arrangement that goes quietly wrong.
+
+**Two edges, not one.** The Edge column is the model's disagreement with the
+market — expected value priced at the no-vig consensus. Beneath it, where they
+differ, is what the bet is worth at the best price on offer. Keeping them apart
+matters: the gap between consensus and best price is positive on *both* sides of
+a game whenever books disagree, so counting it as model edge made every market
+look like a play and set the divergence flag off constantly. Bets qualify on the
+first number and are sized on the second, and on any two-way market at most one
+side can now show an edge — which the test suite asserts.
+
+**It knows what day it is.** The page works out the Eastern date from the
+viewer's own clock rather than asking the build, polls for new builds every five
+minutes, rolls over by itself at midnight, refreshes when the tab comes back to
+the foreground, and says so plainly when the feed is stale or today's slate has
+not been built yet.
+
 **Consensus pricing, still keyless.** ESPN's free scoreboard returns several
 sportsbooks in one call. The model de-vigs each, takes the median as the market's
 real opinion, and grades edges against that — while showing the best price on
@@ -254,6 +283,11 @@ PASS — both starters, bullpen availability, the run distribution, every priced
 market, and a paragraph explaining the number.
 
 **Best Bets** — today's card only. What to bet, at what price, for how much.
+
+**Simulator** — the same engine the build runs, with the inputs exposed. Pick a
+game, change the starters, the bullpen, the lineups, the park or the weather,
+and watch the projection, the win probability, the run line, the first five and
+the first inning move. Reachable from the **Simulate** button on any game card.
 
 **Matchups** — the whole slate on one line each: power ranks, true win
 percentages, both rotations and bullpens, park, weather, projection, total
@@ -338,6 +372,8 @@ pipeline/
 docs/                  the dashboard (this is what Pages serves)
   index.html           shell
   styles.css           tokens and components, light and dark
+  schedule.js          which day it is and which slate to open - testable in node
+  sim.js               the game simulator, ported from the build engine
   ledger.js            your ledger: storage, settlement, export - testable in node
   app.js               everything else
 data/                  shadow book + optional manual F5 odds

@@ -36,12 +36,27 @@ def apply(slate: dict) -> dict:
                     b["suppressed"] = f"correlated with {keep['label']}"
                     notes["correlated_suppressed"] += 1
 
-    # ---- 2. cap the number of BEST BETs -------------------------------------
+    # ---- 2. is the whole slate suspect? -------------------------------------
+    # The old test counted how many MARKETS reached best-bet tier and compared
+    # that to a multiple of the number of GAMES - incoherent units, and it fired
+    # on healthy slates. What actually matters is whether the model is
+    # systematically apart from the market or merely disagrees about a few
+    # games, so measure the median gap and say what it was.
+    gaps = []
+    for g in games:
+        ml = [b for b in g["bets"] if b["market"] == "ML" and b.get("p_market") is not None]
+        if len(ml) == 2:
+            gaps.append(abs(ml[0]["p_final"] - ml[0]["p_market"]))
+    if len(gaps) >= C.DIVERGENCE_MIN_GAMES:
+        gaps.sort()
+        mid = len(gaps) // 2
+        med = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+        notes["median_gap"] = round(med, 4)
+        notes["divergence_flag"] = med > C.DIVERGENCE_MEDIAN_GAP
+    notes["priced_games"] = len(gaps)
+
     bests = [(g, b) for g in games for b in g["bets"] if b["tier"] == "BEST BET"]
     bests.sort(key=lambda t: -t[1]["edge"])
-    n_games = max(len(games), 1)
-    if len(bests) > C.DIVERGENCE_FLAG_RATIO * n_games * 2:
-        notes["divergence_flag"] = True
     for _, b in bests[C.MAX_BEST_BETS_PER_SLATE:]:
         b["tier"] = "GOOD"
         b.setdefault("lock_fails", []).append(

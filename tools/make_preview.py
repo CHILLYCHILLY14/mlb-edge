@@ -13,6 +13,8 @@ import json, os, sys
 def bundle(docs_dir: str, out_path: str, body_only: bool = False) -> str:
     html = open(os.path.join(docs_dir, "index.html")).read()
     css = open(os.path.join(docs_dir, "styles.css")).read()
+    sch = open(os.path.join(docs_dir, "schedule.js")).read()
+    simjs = open(os.path.join(docs_dir, "sim.js")).read()
     led = open(os.path.join(docs_dir, "ledger.js")).read()
     js = open(os.path.join(docs_dir, "app.js")).read()
 
@@ -24,6 +26,8 @@ def bundle(docs_dir: str, out_path: str, body_only: bool = False) -> str:
                 embed[f"data/{fn}"] = json.load(fh)
 
     body = html.split("<body>", 1)[1].split("</body>", 1)[0]
+    body = body.replace('<script src="schedule.js"></script>', "")
+    body = body.replace('<script src="sim.js"></script>', "")
     body = body.replace('<script src="ledger.js"></script>', "")
     body = body.replace('<script src="app.js"></script>', "")
     head_title = ("<title>MLB Edge Desk</title>\n"
@@ -33,7 +37,9 @@ def bundle(docs_dir: str, out_path: str, body_only: bool = False) -> str:
     blob = json.dumps(embed, separators=(",", ":")).replace("</", "<\\/")
     payload = (f"{head_title}\n<style>\n{css}\n</style>\n{body}\n"
                f"<script>window.__EMBED__={blob};</script>\n"
-               f"<script>\n{led}\n</script>\n<script>\n{js}\n</script>")
+               f"<script>\n{sch}\n</script>\n<script>\n{simjs}\n</script>\n"
+               f"<script>\n{led}\n</script>\n"
+               f"<script>\n{js}\n</script>")
 
     if body_only:
         out = payload

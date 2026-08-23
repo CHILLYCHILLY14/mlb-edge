@@ -4,7 +4,7 @@ Written for someone who has never used GitHub. No coding. About 20 minutes the
 first time, then it runs itself.
 
 **What you end up with:** a web address of your own that rebuilds the whole model
-eight times a day and shows today's slate, and that address dropped into your Wix
+nine times a day and shows today's slate, and that address dropped into your Wix
 page so it appears as part of your site.
 
 **What you need:** the `mlb-edge.zip` file, an email address, and a free GitHub
@@ -144,9 +144,16 @@ Combine them with `&`, like
 
 ## Part 3 — Using it
 
-**It updates itself.** Eight times a day: early morning, late morning,
-afternoon, when lineups post, before first pitch, mid-evening, late, and
-overnight. You do not have to do anything.
+**It updates itself.** Nine times a day: just after midnight Eastern so the new
+day exists before anyone looks, early morning, late morning, afternoon, when
+lineups post, before first pitch, mid-evening, late, and a pre-dawn pass that
+grades everything that finished. You do not have to do anything.
+
+**The page keeps itself current too.** It works out today's date from your own
+phone or computer rather than from whenever the build last ran, checks for a new
+build every five minutes, rolls over to the next day by itself at midnight, and
+refreshes when you come back to the tab. If today's slate has not been built yet
+it shows the most recent one and says so, rather than going blank.
 
 **To force a refresh right now:** Actions tab → **Build MLB slate** →
 **Run workflow**. Give it five minutes.
@@ -163,6 +170,27 @@ it settles itself once the game finishes.
 **Back up your ledger.** It lives in your browser, so clearing your browsing data
 erases it. In My Ledger tap **Export JSON** every so often and keep the file.
 **Import** puts it back.
+
+### The simulator
+
+The **Simulator** tab (or the **Simulate** button on any game card) opens that
+game in the same engine the build uses, running in your browser. Everything that
+moves the score is a control:
+
+| Control | What it does |
+|---|---|
+| Starter sharper / worse | makes that pitcher better or worse by up to 25% |
+| Pulled earlier / later | how many batters he faces before the bullpen comes in |
+| Bullpen sharper / worse | the same, for the relief corps |
+| Lineup | tap any hitter to sit him and drop a replacement-level bat in |
+| Weather run environment | colder and blowing in, or hot and blowing out |
+| Park run environment | play the same game in a bigger or smaller yard |
+| Simulations | more runs, less noise, slower |
+
+Every result is shown next to what the build published, with the change in
+percentage points, plus the fair price for each market. The note underneath
+tells you how much sampling noise there is at your simulation count — anything
+smaller than that is not a real move.
 
 ### Looking ahead
 
@@ -283,7 +311,9 @@ seeing it, updated.
 | Wix shows an empty white box | the address is wrong or missing `https://` | Re-copy it from Settings → Pages. It must start with `https://`. |
 | The dashboard is there but tiny/cut off | the Wix embed box is too short | In the Wix editor drag the box taller. It does not resize itself. |
 | My Ledger is empty | browser data was cleared, or you are on a different device | It is stored per browser. Import the JSON you exported. |
-| Same numbers all day | you are looking at a cached page | Pull down to refresh, or add `?x=1` to the address. |
+| Same numbers all day | you are looking at a cached page | Pull down to refresh, or add `?x=1` to the address. The page also re-checks every five minutes on its own. |
+| A banner says today's slate is not built yet | the overnight run has not landed | It should arrive within the hour. If it has not, check the Actions tab - the job may be failing. |
+| A banner says the feed is hours old | the scheduled job is failing | Actions tab, open the newest run, read the red step. |
 | Red **divergence flag** banner | the model disagrees with the market on an unusual share of the slate | Usually a data problem, not free money. The model already capped its own best bets. Treat that day's edges with suspicion. |
 | Lots of games say **lineups projected** | batting orders are not posted yet | Normal until a few hours before first pitch. Best bets need confirmed starters, so more appear as the day goes on. |
 | Later days say **no prices yet** | books have not hung numbers that far out | Expected — books post two or three days ahead. The model publishes its own fair line so you can shop it when the number lands. |

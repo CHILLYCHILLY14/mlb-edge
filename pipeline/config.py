@@ -103,7 +103,14 @@ MAX_BEST_BETS_PER_SLATE = 3     # a real edge is rare; eight a night is a bug
 MAX_PLAYS_PER_SLATE     = 6     # total staked positions in one day
 MAX_SLATE_EXPOSURE_PCT  = 0.15  # total money at risk across the whole slate
 ONE_SIDE_BET_PER_GAME   = True  # never stake both the ML and the run line
-DIVERGENCE_FLAG_RATIO   = 0.40  # if >40% of the slate screams edge, distrust it
+# How far the model may typically sit from the market before the whole slate is
+# suspect. Measured as the MEDIAN gap between the model's final moneyline
+# probability and the no-vig consensus, across every priced game - a median, so
+# three genuine disagreements do not trip it but a systematic one does. A model
+# anchored 40% to the market should normally sit 1-3 points away; 5+ points on a
+# typical game means an input is wrong, not that the market is.
+DIVERGENCE_MEDIAN_GAP   = 0.050
+DIVERGENCE_MIN_GAMES    = 6     # too few priced games to judge a slate by
 
 # --------------------------------------------------------------- lookahead ---
 # The schedule is published for the whole season, probable starters land a few

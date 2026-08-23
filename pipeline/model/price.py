@@ -12,9 +12,32 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
     if price is None:
         return None
     p_final = cap_prob(blend(p_model, p_market, blend_w))
-    e_raw = raw_edge(p_final, price)
-    e_c = compress(e_raw, ceiling)
-    stake, kf = kelly_stake(e_c, price, C.BANKROLL)
+
+    # Two different edges, and conflating them was a real bug.
+    #
+    # MODEL EDGE is what the model actually disagrees with the market about:
+    # expected value priced at the no-vig consensus. On any two-way market it is
+    # positive on at most one side, by construction, because the two model
+    # probabilities sum to one and so do the two market probabilities.
+    #
+    # REALIZED EDGE is what the bet is worth at the number you can actually
+    # take. It includes the gap between the consensus and the best price on
+    # offer - which is genuinely worth something, but it is line shopping, not
+    # handicapping, and it is positive on BOTH sides of a game whenever books
+    # differ. Tiering on it made every game look like a play and set the
+    # divergence flag off on half the slate.
+    #
+    # So: qualify on the model edge, size on the realized one.
+    e_real = raw_edge(p_final, price)
+    e_real_c = compress(e_real, ceiling)
+    if p_market is not None and p_market > 0:
+        e_model = p_final / p_market - 1.0
+    else:
+        e_model = e_real
+    e_c = compress(e_model, ceiling)
+    e_price = round(e_real_c - e_c, 4)
+
+    stake, kf = kelly_stake(min(e_c, e_real_c), price, C.BANKROLL)
     tier = tier_for(e_c)
     fails = []
     if tier == "BEST BET":
@@ -33,8 +56,10 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
         "p_model": round(p_model, 4), "p_market": (round(p_market, 4) if p_market is not None else None),
         "p_final": round(p_final, 4),
         "fair_price": fmt_american(prob_to_american(p_final)),
-        "edge_raw": round(e_raw, 4), "edge": round(e_c, 4),
+        "edge_raw": round(e_model, 4), "edge": round(e_c, 4),
         "edge_pct": round(e_c * 100, 2),
+        "edge_real": round(e_real_c, 4), "edge_real_pct": round(e_real_c * 100, 2),
+        "edge_price": e_price, "edge_price_pct": round(e_price * 100, 2),
         "tier": tier, "stake": round(stake, 2), "kelly": round(kf, 4),
         "to_win": round(stake * (american_to_decimal(price) - 1.0), 2),
         "lock_fails": fails,

@@ -206,9 +206,13 @@ def _espn(date_str):
         rng = random.Random(hash((date_str, away, home, "odds")) & 0xFFFFFF)
         # a market that is roughly right, the way a real one is: price off the
         # talent gap plus home field, then add a little noise and some vig
-        gap = (TALENT[home]["off"] + TALENT[home]["sp"] + TALENT[home]["pen"]
-               - TALENT[away]["off"] - TALENT[away]["sp"] - TALENT[away]["pen"])
-        p_home = min(max(0.532 + gap * 1.6 + rng.gauss(0, 0.02), 0.28), 0.72)
+        override = MARKET_OVERRIDE.get((TEAM_ABBR[away], TEAM_ABBR[home]))
+        if override is not None:
+            p_home = min(max(override + rng.gauss(0, 0.018), 0.20), 0.80)
+        else:
+            gap = (TALENT[home]["off"] + TALENT[home]["sp"] + TALENT[home]["pen"]
+                   - TALENT[away]["off"] - TALENT[away]["sp"] - TALENT[away]["pen"])
+            p_home = min(max(0.532 + gap * 1.6 + rng.gauss(0, 0.02), 0.28), 0.72)
         def price(p):
             p = min(max(p * 1.022, 0.02), 0.97)
             return round(-100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
@@ -256,6 +260,14 @@ def _weather():
 
 
 FINAL_DATES: set[str] = set()
+
+# A real sportsbook is approximately right, so a fake one should be too.
+# Populated by tools/make_sample.py with the model's own simulated probability
+# from a first pass, then jittered - which makes the preview show the small
+# disagreements a live slate actually produces instead of the wild ones a
+# hand-rolled linear market invents. Left empty, the linear fallback is used,
+# which is what the test suite wants: it exercises the extremes on purpose.
+MARKET_OVERRIDE: dict[tuple, float] = {}
 
 
 def responder(url: str, **kw):

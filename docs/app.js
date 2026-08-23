@@ -10,10 +10,13 @@ const T = Q.get("theme");
 if (T === "light" || T === "dark") document.documentElement.dataset.theme = T;
 
 const S = { index: null, slate: null, ratings: null, perf: null, results: null,
-            preds: null, mine: [], storageOK: true,
+            preds: null, pick: null, simPick: null, simState: null, simFor: null,
+            mine: [], storageOK: true,
             date: Q.get("date") || null, tab: Q.get("tab") || "slate" };
 
 const L = (typeof MLBLedger !== "undefined") ? MLBLedger : null;
+const SCH = (typeof MLBSchedule !== "undefined") ? MLBSchedule : null;
+const todayET = () => SCH ? SCH.easternDate() : new Date().toISOString().slice(0, 10);
 
 const $  = (s, r = document) => r.querySelector(s);
 const el = (t, c, h) => { const n = document.createElement(t);
@@ -82,7 +85,7 @@ function renderKPIs() {
 
 /* ------------------------------------------------------------------ tabs */
 const TABS = [["slate", "Slate"], ["bets", "Best Bets"], ["matchups", "Matchups"],
-              ["mine", "My Ledger"], ["ratings", "Power Ratings"],
+              ["sim", "Simulator"], ["mine", "My Ledger"], ["ratings", "Power Ratings"],
               ["accuracy", "Accuracy"], ["model", "Model"]];
 function renderTabs() {
   const n = $("#tabs"); n.innerHTML = "";
@@ -298,7 +301,9 @@ function betRows(bets, g) {
       <td class="num">${esc(b.fair_price)}</td>
       <td class="num">${pct(b.p_final)}</td>
       <td class="num hide-sm">${b.p_market == null ? "—" : pct(b.p_market)}</td>
-      <td class="num ${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%</td>
+      <td class="num ${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%
+        ${b.edge_price_pct ? `<br><span class="sup">${b.edge_real_pct > 0 ? "+" : ""}${
+          num(b.edge_real_pct, 2)}% at this price</span>` : ""}</td>
       <td class="hide-sm">${edgeMeter(b.edge)}</td>
       <td><span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span></td>
       <td class="num">${stake}</td>
@@ -334,13 +339,17 @@ function bestChip(g) {
   const b = g.best;
   if (!b || b.tier === "PASS")
     return `<div class="glance-bet"><span class="tier pass">NO PLAY</span>
-      <span class="sup">market is priced where the model is</span></div>`;
+      <span class="sup">market is priced where the model is</span>
+      ${g.sim_inputs ? `<button class="add" data-sim-open="${g.gamePk}"
+        title="Open this game in the simulator">Simulate</button>` : ""}</div>`;
   return `<div class="glance-bet">
     <span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span>
     <b>${esc(b.label)}</b> <span class="mono">${esc(b.price_txt)}</span>
     <span class="${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%</span>
     ${b.stake > 0 ? `<span class="sup">${money(b.stake)}</span>` : ""}
-    ${addBtn(g, b)}</div>`;
+    ${addBtn(g, b)}
+    ${g.sim_inputs ? `<button class="add" data-sim-open="${g.gamePk}"
+      title="Open this game in the simulator">Simulate</button>` : ""}</div>`;
 }
 
 /* Markets nobody publishes a free price for. The simulation produces them
@@ -494,14 +503,33 @@ function whatToBet() {
   return v;
 }
 
+/* Say plainly when the page is not showing what the viewer asked for. */
+function freshnessBanner() {
+  const age = SCH ? SCH.ageHours((S.index || {}).generated_at) : null;
+  const bits = [];
+  if (S.pick && S.pick.reason === "behind" && S.date !== todayET())
+    bits.push(`Today's slate (${todayET()}) has not been built yet, so this is the most
+      recent one. The build runs through the night; it should appear shortly.`);
+  if (age != null && age > 8)
+    bits.push(`The feed was last built ${age.toFixed(0)} hours ago — the scheduled job may be
+      failing. Check the Actions tab in the repository.`);
+  if (!bits.length) return null;
+  return el("div", "flag", bits.map(esc).join(" "));
+}
+
 function viewSlate() {
   const v = el("div");
   const games = (S.slate || {}).games || [];
   const pf = (S.slate || {}).portfolio || {};
+  const fresh = freshnessBanner();
+  if (fresh) v.append(fresh);
   if (pf.divergence_flag)
     v.append(el("div", "flag",
-      "Divergence flag: the model disagrees with the market on an unusual share of this slate. " +
-      "That is far more often a data problem than a market mispricing, so best bets were capped."));
+      `Slate-wide divergence: on a typical game the model is ${pct(pf.median_gap, 1)} away from ` +
+      `the market, against a ${pct((S.index?.settings?.divergence_gap) ?? 0.05, 1)} threshold. ` +
+      `A model anchored to the market should normally sit within a point or two, so a gap this ` +
+      `size across ${pf.priced_games} priced games points at an input being wrong — stale prices, ` +
+      `missing starters — rather than at the market being wrong. Treat today's edges with suspicion.`));
   if (!games.length) {
     if (!S.slate || !S.slate.generated_at)
       return el("div", "empty",
@@ -613,6 +641,246 @@ function viewMatchups() {
 
 function mineSummary() {
   return L ? L.summarise(S.mine, (S.index || {}).bankroll || 0) : null;
+}
+
+/* ============================================================== simulator ==
+   The same engine the build runs, in the page, with the inputs exposed. Change
+   a starter, sit a hitter, turn the wind around, and watch the score move. The
+   baseline is whatever the build published, so every number is shown as a
+   difference from it rather than in isolation.                              */
+
+const SIM = (typeof MLBSim !== "undefined") ? MLBSim : null;
+
+const SIM_DEFAULTS = () => ({
+  away: { spQuality: 1, penQuality: 1, bfMean: null, benched: [], adv: null },
+  home: { spQuality: 1, penQuality: 1, bfMean: null, benched: [], adv: null },
+  wx: 1, park: 1, nSims: 12000,
+});
+
+/* Surname if there is one. Falls back to a truncated full name so a
+   single-word or numbered name does not render as a bare digit. */
+function shortName(n) {
+  const parts = String(n || "").trim().split(/\s+/);
+  const last = parts[parts.length - 1];
+  if (parts.length > 1 && !/^[\d.]+$/.test(last)) return last;
+  return String(n || "").slice(0, 12);
+}
+
+function simGame() {
+  const games = ((S.slate || {}).games || []).filter(g => g.sim_inputs);
+  if (!games.length) return null;
+  const want = S.simPick;
+  return games.find(g => String(g.gamePk) === String(want)) || games[0];
+}
+
+function runSim(g, st) {
+  const inp = g.sim_inputs;
+  const wx = SIM.weatherMults(st.wx);
+  const park = SIM.weatherMults(st.park);
+  const side = (s, key) => Object.assign({}, st[key], {
+    hr: wx.hr * park.hr, hit: wx.hit * park.hit,
+    benched: st[key].benched,
+    bfMean: st[key].bfMean == null ? undefined : st[key].bfMean,
+    adv: st[key].adv == null ? undefined : st[key].adv,
+  });
+  const rlLine = (g.odds && g.odds.rl_line != null) ? g.odds.rl_line : -1.5;
+  return SIM.runGame(inp, {
+    away: side(inp.away, "away"), home: side(inp.home, "home"),
+    marketTotal: (g.odds || {}).total, rlLine,
+  }, st.nSims, inp.seed);
+}
+
+function dl(now, was, digits, invert) {
+  if (was == null || !isFinite(was)) return "";
+  const d = now - was;
+  if (Math.abs(d) < Math.pow(10, -digits) / 2) return "";
+  const cls = (invert ? -d : d) > 0 ? "pos" : "neg";
+  return `<span class="delta ${cls}">${d > 0 ? "+" : ""}${d.toFixed(digits)}</span>`;
+}
+
+function simSlider(label, key, side, min, max, step, val, fmt) {
+  return `<div class="row">
+    <label for="sl-${side}-${key}">${esc(label)}</label>
+    <input type="range" id="sl-${side}-${key}" data-sim="${side}" data-key="${key}"
+      min="${min}" max="${max}" step="${step}" value="${val}">
+    <span class="val">${esc(fmt(val))}</span></div>`;
+}
+
+function simControls(g, st) {
+  const inp = g.sim_inputs;
+  const pct1 = v => `${v > 1 ? "+" : ""}${((v - 1) * 100).toFixed(0)}%`;
+  const lineup = (key) => {
+    const side = inp[key];
+    return `<div class="lineup-toggle">${side.bats.map((b, i) => `
+      <button data-bench="${key}:${i}" class="${st[key].benched.includes(i) ? "off" : ""}"
+        title="${esc(b.name)} — ${b.pa} PA. Tap to replace with a replacement-level bat.">
+        ${i + 1}. ${esc(shortName(b.name))}</button>`).join("")}</div>`;
+  };
+  return `
+  <div class="ctrl"><h4>Game</h4>
+    <select class="pick" data-simpick>${((S.slate || {}).games || [])
+      .filter(x => x.sim_inputs).map(x => `<option value="${x.gamePk}"
+        ${String(x.gamePk) === String(g.gamePk) ? "selected" : ""}>
+        ${esc(x.away)} @ ${esc(x.home)} — ${timeET(x.start)}</option>`).join("")}</select>
+    <div class="simnote">${esc(g.venue)} · park ${g.park.run}/${g.park.hr}
+      · ${g.lineups_confirmed ? "confirmed lineups" : "projected lineups"}</div>
+  </div>
+
+  <div class="ctrl"><h4>Pitching — ${esc(g.away)} throwing</h4>
+    <div class="simnote" style="margin:0 0 6px">${esc(inp.home.opp_sp_name)}
+      ${(g.away_sp || {}).era != null ? `· ${num((g.away_sp || {}).era)} ERA` : ""}</div>
+    ${simSlider("Starter sharper / worse", "spQuality", "home", 0.75, 1.25, 0.01,
+                st.home.spQuality, v => pct1(2 - v))}
+    ${simSlider("Pulled earlier / later", "bfMean", "home", 9, 30, 0.5,
+                st.home.bfMean == null ? inp.home.bf_mean : st.home.bfMean,
+                v => `${(+v).toFixed(1)} BF`)}
+    ${simSlider("Bullpen sharper / worse", "penQuality", "home", 0.75, 1.25, 0.01,
+                st.home.penQuality, v => pct1(2 - v))}
+  </div>
+
+  <div class="ctrl"><h4>Pitching — ${esc(g.home)} throwing</h4>
+    <div class="simnote" style="margin:0 0 6px">${esc(inp.away.opp_sp_name)}
+      ${(g.home_sp || {}).era != null ? `· ${num((g.home_sp || {}).era)} ERA` : ""}</div>
+    ${simSlider("Starter sharper / worse", "spQuality", "away", 0.75, 1.25, 0.01,
+                st.away.spQuality, v => pct1(2 - v))}
+    ${simSlider("Pulled earlier / later", "bfMean", "away", 9, 30, 0.5,
+                st.away.bfMean == null ? inp.away.bf_mean : st.away.bfMean,
+                v => `${(+v).toFixed(1)} BF`)}
+    ${simSlider("Bullpen sharper / worse", "penQuality", "away", 0.75, 1.25, 0.01,
+                st.away.penQuality, v => pct1(2 - v))}
+  </div>
+
+  <div class="ctrl"><h4>${esc(g.away)} lineup</h4>${lineup("away")}
+    <div class="simnote">Tap a name to sit him and drop a replacement-level bat in.</div></div>
+  <div class="ctrl"><h4>${esc(g.home)} lineup</h4>${lineup("home")}</div>
+
+  <div class="ctrl"><h4>Conditions</h4>
+    <div class="simnote" style="margin:0 0 6px">${
+      (g.weather || {}).roof_closed ? "Roof shut in the published run."
+      : (g.weather || {}).ok ? `Published: ${Math.round(g.weather.temp_f)}°F,
+          ${Math.abs(g.weather.wind_component || 0).toFixed(0)}mph
+          ${(g.weather.wind_component || 0) > 0 ? "out" : "in"},
+          ${g.weather.applied_pct > 0 ? "+" : ""}${g.weather.applied_pct}% runs`
+      : "No forecast in the published run."}</div>
+    ${simSlider("Weather run environment", "wx", "global", 0.85, 1.15, 0.01,
+                st.wx, v => pct1(v))}
+    ${simSlider("Park run environment", "park", "global", 0.85, 1.15, 0.01,
+                st.park, v => pct1(v))}
+    ${simSlider("Simulations", "nSims", "global", 4000, 30000, 2000,
+                st.nSims, v => `${(+v / 1000).toFixed(0)}k`)}
+    <div class="row" style="margin-top:9px">
+      <button class="btn" data-simreset>Reset to the published game</button></div>
+  </div>`;
+}
+
+function simResults(g, st, res) {
+  const base = g.sim;
+  const o = g.odds || {};
+  const changed = JSON.stringify(st) !== JSON.stringify(
+    Object.assign(SIM_DEFAULTS(), { nSims: st.nSims }));
+  const bars = (() => {
+    const h = res.hist, max = Math.max(...h) || 1, n = res.n || h.reduce((a, b) => a + b, 0);
+    return `<div class="dist">${h.map((v, i) => `<span class="${v / max > 0.55 ? "hot" : ""}${
+      o.total != null && Math.round(o.total) === i ? " line" : ""}"
+      style="height:${Math.max(2, Math.round(v / max * 100))}%"
+      title="${i} runs: ${(v / n * 100).toFixed(1)}%"></span>`).join("")}</div>
+      <div class="axis"><span>0 runs</span><span>total runs scored</span><span>22+</span></div>`;
+  })();
+
+  return `<div class="simout">
+    <div class="simscore">${res.mean_away.toFixed(2)}${dl(res.mean_away, base.mean_away, 2)}
+      <small>–</small> ${res.mean_home.toFixed(2)}${dl(res.mean_home, base.mean_home, 2)}
+      <small>&nbsp;projected</small></div>
+    <div class="lab" style="display:flex;justify-content:space-between;
+      font-family:var(--mono);font-size:11px;color:var(--dim);margin:8px 0 4px">
+      <span>${esc(g.away)} ${pct(1 - res.p_home)}</span>
+      <span>total ${res.mean_total.toFixed(2)}${dl(res.mean_total, base.mean_total, 2)}${
+        o.total != null ? ` vs ${o.total}` : ""}</span>
+      <span>${pct(res.p_home)} ${esc(g.home)}</span></div>
+    <div class="bar"><i class="a" style="width:${((1 - res.p_home) * 100).toFixed(1)}%"></i>
+      <i class="h" style="width:${(res.p_home * 100).toFixed(1)}%"></i></div>
+    ${bars}
+    <div class="scroll"><table class="rt">
+      <thead><tr><th>Market</th><th class="num">Simulated</th><th class="num">Published</th>
+        <th class="num">Change</th><th class="num">Fair price</th></tr></thead>
+      <tbody>
+        ${simRow(`${g.home} win`, res.p_home, base.p_sim_home, true)}
+        ${simRow(`${g.home} ${((g.odds || {}).rl_line ?? -1.5) > 0 ? "+" : ""}${
+          (g.odds || {}).rl_line ?? -1.5}`, res.p_home_rl, base.p_home_rl, true)}
+        ${o.total != null ? simRow(`Over ${o.total}`, res.p_total_over, base.p_total_over, true) : ""}
+        ${simRow("First five — " + g.home, res.p_f5_home, base.p_f5_home, true)}
+        ${simRow("No run in the 1st", res.p_nrfi, base.p_nrfi, true)}
+        ${simRow(`${g.away} shut out`, res.p_away_shutout, base.p_away_shutout, true)}
+        ${simRow(`${g.home} shut out`, res.p_home_shutout, base.p_home_shutout, true)}
+      </tbody></table></div>
+    <div class="simnote">${changed
+      ? `Inputs changed from the published run. ${(st.nSims / 1000).toFixed(0)},000 simulations —
+         about ${(res.se * 100).toFixed(2)} points of sampling noise on the win probability, so
+         treat anything smaller than that as nothing.`
+      : `This is the published game, re-run in your browser with the same engine and the same
+         seed. Move a slider to see what changes it.`}</div>
+  </div>`;
+}
+
+function simRow(label, now, was, asPct) {
+  const d = (was == null) ? null : now - was;
+  return `<tr><td data-primary>${esc(label)}</td>
+    <td class="num">${asPct ? pct(now) : num(now)}</td>
+    <td class="num">${was == null ? "—" : (asPct ? pct(was) : num(was))}</td>
+    <td class="num ${d == null ? "" : sgn(d)}">${
+      d == null ? "—" : (d > 0 ? "+" : "") + (d * 100).toFixed(1) + " pts"}</td>
+    <td class="num">${fairFromProb(now)}</td></tr>`;
+}
+
+function fairFromProb(p) {
+  if (!isFinite(p) || p <= 0 || p >= 1) return "—";
+  const a = p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p;
+  return (a > 0 ? "+" : "") + a.toFixed(0);
+}
+
+function viewSimulator() {
+  if (!SIM) return el("div", "empty", "Simulator engine failed to load.");
+  const g = simGame();
+  if (!g) return el("div", "empty",
+    "No simulatable games on this date yet — the inputs are published once a slate is built.");
+  S.simPick = g.gamePk;
+  if (!S.simState || S.simFor !== g.gamePk) {
+    S.simState = SIM_DEFAULTS();
+    S.simFor = g.gamePk;
+  }
+  const st = S.simState;
+  let res;
+  try {
+    res = runSim(g, st);
+  } catch (err) {
+    return el("div", "empty", "Simulation failed: " + esc(String(err && err.message)));
+  }
+  const v = el("div", "card simcard");
+  v.innerHTML = `<div class="hd"><div class="match">${esc(g.away)} @ ${esc(g.home)} — simulator</div>
+    <div class="meta"><span class="chip">${(st.nSims / 1000).toFixed(0)}k simulations</span>
+      <span class="chip">${esc(g.readiness_note || "")}</span></div></div>
+    <div class="body"><div class="simgrid">
+      <div id="simctl">${simControls(g, st)}</div>
+      <div id="simres">${simResults(g, st, res)}</div>
+    </div></div>`;
+  return v;
+}
+
+function rerunSim() {
+  const g = simGame();
+  if (!g || !SIM) return;
+  const host = $("#simres");
+  if (host) host.classList.add("simbusy");
+  // Let the class paint before a chunk of synchronous simulation.
+  setTimeout(() => {
+    const res = runSim(g, S.simState);
+    if (host) { host.innerHTML = simResults(g, S.simState, res); host.classList.remove("simbusy"); }
+    const ctl = $("#simctl");
+    if (ctl) labelTables(ctl);
+    const out = $("#simres");
+    if (out) labelTables(out);
+    reportHeight();
+  }, 16);
 }
 
 function viewMine() {
@@ -1006,6 +1274,15 @@ function viewModel() {
    splitting the margin evenly. The model is then pulled ${pct(st.market_blend ?? 0.40, 0)}
    of the way toward that no-vig price.</p>
 
+   <p><b>4b. Two edges, not one.</b> The number in the Edge column is the model's
+   disagreement with the market: expected value priced at the no-vig consensus of
+   every book in the feed. Underneath it, where they differ, is what the bet is
+   actually worth at the best price on offer. Keeping them apart matters — the
+   gap between consensus and best price is positive on <em>both</em> sides of a
+   game whenever books disagree, so counting it as model edge would make every
+   market look like a play. Bets qualify on the first number and are sized on the
+   second.</p>
+
    <p><b>5. Edge and stake.</b> Raw expected value is squashed through tanh toward a hard ceiling
    of ${pct(st.edge_ceiling ?? 0.055, 1)}, and the stake is computed from the compressed number
    using ${st.kelly ?? 0.25} Kelly, capped at ${pct(st.max_stake_pct ?? 0.05, 0)} of bankroll.
@@ -1050,7 +1327,9 @@ function labelTables(root) {
 function weekStrip() {
   const dates = ((S.index || {}).dates || []).slice().sort();
   if (dates.length < 2) return "";
-  const today = (S.index || {}).latest || S.date;
+  // The viewer's Eastern date, not the build's. Marking the build's last run as
+  // "today" is what made the strip and the Today button disagree.
+  const today = todayET();
   const forward = dates.filter(d => d >= today).slice(0, 8);
   const back = dates.filter(d => d < today).slice(-2);
   const show = back.concat(forward);
@@ -1076,7 +1355,7 @@ function renderView() {
   const strip = weekStrip();
   if (strip) v.insertAdjacentHTML("beforeend", strip);
   const map = { slate: viewSlate, bets: viewBets, matchups: viewMatchups,
-                mine: viewMine, ratings: viewRatings,
+                sim: viewSimulator, mine: viewMine, ratings: viewRatings,
                 accuracy: viewAccuracy, model: viewModel };
   v.append((map[S.tab] || viewSlate)());
   labelTables(v);
@@ -1185,6 +1464,32 @@ function settlePending() {
 }
 
 function onClick(ev) {
+  const open = ev.target.closest("[data-sim-open]");
+  if (open) {
+    S.simPick = open.dataset.simOpen;
+    S.simState = null;
+    S.tab = "sim";
+    renderTabs(); renderView(); syncURL();
+    return;
+  }
+
+  const bench = ev.target.closest("button[data-bench]");
+  if (bench) {
+    const [side, idxs] = bench.dataset.bench.split(":");
+    const i = parseInt(idxs, 10);
+    const list = S.simState[side].benched;
+    const at = list.indexOf(i);
+    if (at >= 0) list.splice(at, 1); else list.push(i);
+    bench.classList.toggle("off", at < 0);
+    scheduleSimRun();
+    return;
+  }
+  if (ev.target.closest("[data-simreset]")) {
+    S.simState = SIM_DEFAULTS();
+    renderView();
+    return;
+  }
+
   const add = ev.target.closest("button.add[data-bet]");
   if (add) { toggleBet(add.dataset.bet); return; }
 
@@ -1242,7 +1547,43 @@ function onClick(ev) {
   }
 }
 
+function onSimInput(ev) {
+  const sl = ev.target.closest("input[type=range][data-sim]");
+  if (sl) {
+    const side = sl.dataset.sim, key = sl.dataset.key, val = parseFloat(sl.value);
+    if (side === "global") S.simState[key] = val;
+    else S.simState[side][key] = val;
+    const box = sl.closest(".row");
+    if (box) {
+      const out = box.querySelector(".val");
+      if (out) {
+        const pct1 = v => `${v > 1 ? "+" : ""}${((v - 1) * 100).toFixed(0)}%`;
+        out.textContent = key === "bfMean" ? `${val.toFixed(1)} BF`
+          : key === "nSims" ? `${(val / 1000).toFixed(0)}k`
+          : key === "spQuality" || key === "penQuality" ? pct1(2 - val)
+          : pct1(val);
+      }
+    }
+    scheduleSimRun();
+    return true;
+  }
+  return false;
+}
+
+let simTimer = null;
+function scheduleSimRun() {
+  clearTimeout(simTimer);
+  simTimer = setTimeout(rerunSim, 140);   // let a dragged slider settle first
+}
+
 function onChange(ev) {
+  const pickG = ev.target.closest("select[data-simpick]");
+  if (pickG) {
+    S.simPick = pickG.value;
+    S.simState = null;
+    renderView();
+    return;
+  }
   const inp = ev.target.closest("input.stake[data-stake]");
   if (!inp || !L) return;
   const k = inp.dataset.stake;
@@ -1264,6 +1605,7 @@ function onChange(ev) {
 
 document.addEventListener("click", onClick);
 document.addEventListener("change", onChange);
+document.addEventListener("input", onSimInput);
 
 /* --------------------------------------------------------------- loading */
 function shiftDate(days) {
@@ -1277,8 +1619,10 @@ async function loadDate(ds) {
   $("#curDate").textContent = ds;
   $("#view").innerHTML = `<div class="empty">Loading ${ds}…</div>`;
   S.slate = await getJSON(`data/slate-${ds}.json`) || { date: ds, games: [] };
+  const age = SCH ? SCH.ageHours((S.index || {}).generated_at) : null;
   $("#stamp").textContent = S.slate.generated_at
-    ? `updated ${agoTxt(S.slate.generated_at)}` : "no data for this date";
+    ? `updated ${agoTxt(S.slate.generated_at)}${age != null && age > 8 ? " · stale" : ""}`
+    : "no data for this date";
   renderKPIs(); renderView(); syncURL();
 }
 
@@ -1297,13 +1641,58 @@ async function boot() {
     `${(S.index.settings || {}).season || ""} · ${((S.index.settings || {}).n_sims || 20000).toLocaleString()} sims/game`;
   $("#nsims").textContent = ((S.index.settings || {}).n_sims || 20000).toLocaleString();
   renderTabs();
-  await loadDate(S.date || S.index.latest || new Date().toISOString().slice(0, 10));
+  const pick = SCH
+    ? SCH.resolveDate(S.index.dates, todayET(), S.date)
+    : { date: S.date || S.index.latest, reason: "none", stale: false };
+  S.pick = pick;
+  await loadDate(pick.date);
 
   $("#prev").onclick = () => loadDate(shiftDate(-1));
   $("#next").onclick = () => loadDate(shiftDate(1));
-  $("#today").onclick = () => loadDate(S.index.latest || new Date().toISOString().slice(0, 10));
+  $("#today").onclick = () => {
+    // The viewer's Eastern date, not whatever day the last build thought it
+    // was. If it has not been built yet, resolveDate falls back and says so.
+    const p = SCH ? SCH.resolveDate(S.index.dates, todayET(), null)
+                  : { date: S.index.latest };
+    S.pick = p;
+    loadDate(p.date);
+  };
   setInterval(() => { if (S.slate?.generated_at)
     $("#stamp").textContent = `updated ${agoTxt(S.slate.generated_at)}`; }, 60000);
+  startWatching();
+}
+
+/* A dashboard people leave open needs to notice three things: a new build
+   landing, midnight passing, and the tab coming back to the foreground after
+   hours in the background. */
+let watchTimer = null;
+
+async function checkForUpdates(force) {
+  const fresh = await getJSON("data/index.json");
+  if (!fresh) return;
+  const state = { generatedAt: (S.index || {}).generated_at,
+                  date: S.date, onToday: S.date === todayET() || S.pick?.reason === "behind" };
+  const verdict = SCH ? SCH.shouldRefresh(state, fresh, new Date())
+                      : { reload: false };
+  if (!verdict.reload && !force) return;
+  S.index = fresh;
+  S.ratings = await getJSON("data/ratings.json") || S.ratings;
+  S.perf = await getJSON("data/performance.json") || S.perf;
+  S.results = await getJSON("data/results.json") || S.results;
+  S.preds = await getJSON("data/predictions.json") || S.preds;
+  if (L) { if (settlePending()) persistMine(); }
+  const target = verdict.newDate
+    || (SCH ? SCH.resolveDate(fresh.dates, todayET(), S.date).date : S.date);
+  await loadDate(target);
+  if (verdict.why) toast(`Refreshed — ${esc(verdict.why)}.`);
+}
+
+function startWatching() {
+  clearInterval(watchTimer);
+  watchTimer = setInterval(() => checkForUpdates(false), 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkForUpdates(false);
+  });
 }
 
 /* Wix embeds this in an iframe; tell the parent how tall we are. */

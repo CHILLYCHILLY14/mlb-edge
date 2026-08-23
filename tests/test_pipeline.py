@@ -173,6 +173,31 @@ def test_full_build():
           all(5.5 <= t <= 12.5 for t in tots), f"{min(tots):.2f}-{max(tots):.2f}")
     check("home win probs stay inside 20-80%",
           all(0.20 <= p <= 0.80 for p in homes), f"{min(homes):.3f}-{max(homes):.3f}")
+    # The bug this guards: line shopping is positive on both sides of a game
+    # whenever books disagree, so counting it as model edge made every market
+    # look like a play and set the divergence flag off constantly.
+    two_way = 0
+    for g in games:
+        for mkt in ("ML", "RL", "TOTAL"):
+            sides = [b for b in g["bets"] if b["market"] == mkt and b["p_market"] is not None]
+            if len(sides) != 2:
+                continue
+            two_way += 1
+            if sum(1 for b in sides if b["edge"] > 1e-9) > 1:
+                FAILS.append(f"both sides of {mkt} show an edge in {g['away']}@{g['home']}")
+    check("at most one side of a two-way market can have an edge",
+          not any("both sides of" in f for f in FAILS), f"{two_way} markets checked")
+    check("two-way markets were actually present", two_way > 0, str(two_way))
+    check("the shopping gain is reported separately from the model edge",
+          all("edge_price_pct" in b and "edge_real_pct" in b
+              for g in games for b in g["bets"]))
+    check("realized edge is the model edge plus the shopping gain",
+          all(abs(b["edge_pct"] + b["edge_price_pct"] - b["edge_real_pct"]) < 0.02
+              for g in games for b in g["bets"]))
+    check("no stake exceeds the realized edge's Kelly",
+          all(b["stake"] == 0 or b["edge_real_pct"] > 0 for g in games for b in g["bets"]),
+          "a bet was staked with negative expected value at its own price")
+
     check("no edge exceeds the ceiling",
           max(edges) <= C.EDGE_CEILING + 1e-9, f"{max(edges):.4f}")
     check("no stake exceeds 5% of bankroll",
@@ -329,6 +354,53 @@ def test_full_build():
           all(k in sample for k in ("away_score", "home_score", "f5_away", "f5_home")))
     check("results cover every graded game",
           {str(r["gamePk"]) for r in perf["ledger"]} <= set(res))
+
+    print("\n[slate-wide divergence test]")
+    from pipeline.model import portfolio as PF
+
+    def slate_with(gap):
+        """A slate where the model sits `gap` away from the market everywhere."""
+        gs = []
+        for i in range(12):
+            p = 0.50 + gap
+            gs.append({"gamePk": i, "away": "AAA", "home": "BBB", "bets": [
+                {"market": "ML", "selection": "BBB", "label": "BBB ML", "tier": "GOOD",
+                 "edge": 0.02, "stake": 0.0, "to_win": 0.0, "decimal": 2.0,
+                 "p_final": p, "p_market": 0.50},
+                {"market": "ML", "selection": "AAA", "label": "AAA ML", "tier": "PASS",
+                 "edge": -0.02, "stake": 0.0, "to_win": 0.0, "decimal": 2.0,
+                 "p_final": 1 - p, "p_market": 0.50}]})
+        return {"games": gs}
+
+    calm = slate_with(0.01)
+    PF.apply(calm)
+    check("a model that agrees with the market is not flagged",
+          calm["portfolio"]["divergence_flag"] is False,
+          f"median gap {calm['portfolio'].get('median_gap')}")
+    check("the measured gap is reported either way",
+          abs(calm["portfolio"]["median_gap"] - 0.01) < 1e-6)
+
+    wild = slate_with(0.12)
+    PF.apply(wild)
+    check("a model systematically apart from the market is flagged",
+          wild["portfolio"]["divergence_flag"] is True,
+          f"median gap {wild['portfolio'].get('median_gap')}")
+
+    # a few loud disagreements should not condemn an otherwise sane slate
+    mixed = slate_with(0.01)
+    for g in mixed["games"][:3]:
+        g["bets"][0]["p_final"] = 0.80
+        g["bets"][1]["p_final"] = 0.20
+    PF.apply(mixed)
+    check("three outliers do not condemn a sane slate",
+          mixed["portfolio"]["divergence_flag"] is False,
+          f"median gap {mixed['portfolio'].get('median_gap')}")
+
+    thin = {"games": slate_with(0.30)["games"][:3]}
+    PF.apply(thin)
+    check("too few priced games to judge means no verdict",
+          thin["portfolio"]["divergence_flag"] is False
+          and thin["portfolio"].get("median_gap") is None)
 
     print("\n[prediction ledger]")
     import pipeline.predict as PR

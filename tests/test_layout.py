@@ -19,7 +19,8 @@ swipe that started on one went nowhere.
 from __future__ import annotations
 import os, sys
 
-TABS = ["Slate", "Best Bets", "Matchups", "My Ledger", "Power Ratings", "Accuracy", "Model"]
+TABS = ["Slate", "Best Bets", "Matchups", "Simulator", "My Ledger",
+        "Power Ratings", "Accuracy", "Model"]
 FAILS: list[str] = []
 
 
@@ -92,6 +93,37 @@ def main(path="preview.html"):
         check("page does not scroll sideways", not pg.evaluate(
             "document.body.scrollWidth > document.documentElement.clientWidth + 1"))
         check("no script errors", not errors, errors[0] if errors else "")
+
+        print("\n[date navigation]")
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(url)
+        pg.wait_for_timeout(1800)
+        viewer_today = pg.evaluate("MLBSchedule.easternDate()")
+        opened = pg.inner_text("#curDate")
+        dates = pg.evaluate("(S => S)((window.__EMBED__||{})['data/index.json']||{}).dates || []")
+        check("opens on the viewer's own Eastern date when it has been built",
+              opened == viewer_today or viewer_today not in (dates or []),
+              f"opened {opened}, viewer today {viewer_today}")
+        pg.click("#prev")
+        pg.wait_for_timeout(400)
+        pg.click("#prev")
+        pg.wait_for_timeout(400)
+        back = pg.inner_text("#curDate")
+        check("the arrows move backwards", back < opened, f"{back} vs {opened}")
+        # The bug: Today walked backwards a day on every press because it asked
+        # the build which day it was instead of the viewer's clock.
+        seen = []
+        for _ in range(4):
+            pg.click("#today")
+            pg.wait_for_timeout(400)
+            seen.append(pg.inner_text("#curDate"))
+        check("Today lands on the same day every time", len(set(seen)) == 1, str(seen))
+        check("Today does not walk backwards", seen[0] >= back, f"{seen[0]} vs {back}")
+        check("the week strip agrees with the Today button",
+              pg.evaluate("""() => {
+                const on = document.querySelector('.week button.on');
+                return !on || on.dataset.date === document.querySelector('#curDate').textContent;
+              }"""))
 
         print("\n[both themes paint their own background]")
         for scheme in ("dark", "light"):

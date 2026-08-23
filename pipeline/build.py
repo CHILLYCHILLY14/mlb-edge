@@ -31,12 +31,25 @@ from .sources.mlb_api import (TEAM_ABBR, hitting_splits, people_stats, recent_wo
                               team_pitchers)
 from . import predict
 
-ET = timezone(timedelta(hours=-4))       # display only; all logic runs in UTC
+# Baseball's calendar is written in Eastern time, and Eastern is UTC-4 for most
+# of the season but UTC-5 either side of it. A frozen offset is right in July and
+# an hour wrong in November - enough to build the wrong day's slate overnight.
+# Use the real zone where the platform has tz data, fall back to the summer
+# offset where it does not.
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except Exception:                                    # no tzdata installed
+    ET = timezone(timedelta(hours=-4))
 
 
 # ------------------------------------------------------------------ utils ---
 def today_et() -> str:
     return datetime.now(timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
+
+
+def now_et():
+    return datetime.now(timezone.utc).astimezone(ET)
 
 
 def load_json(path, default):
@@ -151,7 +164,15 @@ class League:
             return R.split_vector(base_counts, base_pa, rec_split["counts"],
                                   rec_split["pa"], self.baseline,
                                   C.PRIOR_PA_BATTER, C.SPLIT_PRIOR_PA)
-        return R.shrink(base_counts, base_pa, self.baseline, C.PRIOR_PA_BATTER)
+        vec = R.shrink(base_counts, base_pa, self.baseline, C.PRIOR_PA_BATTER)
+        if hand:
+            # No split on file for this hitter - a call-up, or someone who has
+            # barely faced left-handers. Fall back to the generic platoon
+            # adjustment rather than silently pretending handedness does not
+            # exist, which is what happened before this line.
+            pl_hr, pl_hit, pl_k = R.platoon_mults(b.get("bats", "R"), hand)
+            vec = R.apply_multipliers(vec, pl_hr, pl_hit, pl_k)
+        return vec
 
     def pitcher_vec(self, p: dict | None, is_sp: bool, penalty: float = 0.0) -> np.ndarray:
         if not p:
@@ -592,6 +613,47 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
                            "total": round(d["fair_total"] * 2) / 2},
             "f5_fair": f5_fair(d),
             "derived": derived_lines(d, g["away"], g["home"]),
+            # Everything the page needs to run the same game again with an
+            # input changed. Rate vectors rather than finished matrices, so the
+            # simulator can recompose after a starter is swapped or the wind
+            # turns round. Rounded hard - five decimals is far below the
+            # Monte Carlo noise floor and keeps the feed small.
+            "sim_inputs": {
+                "league": _vec(lg.baseline),
+                "mults": {"hr": round(hr_m, 5), "hit": round(hit_m, 5),
+                          "def_away": round(a_def, 5), "def_home": round(h_def, 5),
+                          "hfa": C.HOME_FIELD_ADV,
+                          "park_run": park["run"], "park_hr": park["hr"],
+                          "wx_run_mult": round(float(wx.get("run_mult", 1.0)), 5),
+                          "calib_env": round(calib_env, 5)},
+                "away": {
+                    "bats": [{"name": b["name"], "pos": b.get("pos"),
+                              "bats": b.get("bats"), "pa": int(b.get("pa", 0)),
+                              "vs_sp": _vec(a_vecs[("sp", i)]),
+                              "vs_pen": _vec(a_vecs[("pen", i)])}
+                             for i, b in enumerate(a_lineup)],
+                    "opp_sp": _vec(h_sp_vec), "opp_sp3": _vec(T.tto_vector(h_sp_vec)),
+                    "opp_pen": _vec(h_pen_vec),
+                    "opp_sp_name": (h_sp or {}).get("name", "TBA"),
+                    "bf_mean": round(_bf(h_sp), 2), "bf_sd": C.SP_BF_SD,
+                    "bf_min": C.SP_BF_MIN, "bf_max": C.SP_BF_MAX,
+                    "adv": round(R.baserunning_index(ab), 4),
+                    "no_starter": h_sp is None, "hfa_sign": -1},
+                "home": {
+                    "bats": [{"name": b["name"], "pos": b.get("pos"),
+                              "bats": b.get("bats"), "pa": int(b.get("pa", 0)),
+                              "vs_sp": _vec(h_vecs[("sp", i)]),
+                              "vs_pen": _vec(h_vecs[("pen", i)])}
+                             for i, b in enumerate(h_lineup)],
+                    "opp_sp": _vec(a_sp_vec), "opp_sp3": _vec(T.tto_vector(a_sp_vec)),
+                    "opp_pen": _vec(a_pen_vec),
+                    "opp_sp_name": (a_sp or {}).get("name", "TBA"),
+                    "bf_mean": round(_bf(a_sp), 2), "bf_sd": C.SP_BF_SD,
+                    "bf_min": C.SP_BF_MIN, "bf_max": C.SP_BF_MAX,
+                    "adv": round(R.baserunning_index(hb), 4),
+                    "no_starter": a_sp is None, "hfa_sign": 1},
+                "seed": C.RANDOM_SEED + g["gamePk"],
+            },
             "odds": o, "bets": bets, "best": best,
             "verdict": verdict_of(bets, ready, days_out),
             "rationale": rationale(g, d, best, a_sp, h_sp, wx, park, conf,
@@ -611,7 +673,9 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
     print(f"  portfolio: {notes['n_plays']} plays, ${notes['staked']:.2f} at risk, "
           f"{notes['n_best']} best bet(s)"
           + (", exposure scaled" if notes["exposure_scaled"] else "")
-          + (", DIVERGENCE FLAG" if notes["divergence_flag"] else ""))
+          + (f", median gap {notes['median_gap']*100:.1f}pts"
+             if notes.get("median_gap") is not None else "")
+          + (" — DIVERGENCE FLAG" if notes["divergence_flag"] else ""))
     return payload
 
 
@@ -619,6 +683,11 @@ def _recent_window() -> tuple[str, str]:
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=C.RECENT_WINDOW_DAYS)
     return start.isoformat(), end.isoformat()
+
+
+def _vec(v) -> list:
+    """A rate vector, rounded to where Monte Carlo noise swamps the difference."""
+    return [round(float(x), 5) for x in v]
 
 
 def _bf(sp) -> float:
@@ -752,6 +821,12 @@ def main(argv=None):
         "day_summary": day_summary,
         "dates": sorted({*_existing_dates(args.out), *dates}),
         "latest": built[0]["date"] if built else start,
+        # The page works out its own date from the viewer's clock; these are
+        # published so it can tell how far behind the build is, and so a support
+        # question can be answered without guessing.
+        "built_for": start,
+        "server_today_et": today_et(),
+        "server_now_et": now_et().isoformat(timespec="seconds"),
         "bankroll": C.BANKROLL,
         "settings": {"kelly": C.KELLY_FRACTION, "max_stake_pct": C.MAX_STAKE_PCT,
                      "market_blend": C.MARKET_BLEND, "edge_ceiling": C.EDGE_CEILING,
@@ -761,6 +836,7 @@ def main(argv=None):
                      "max_best_bets": C.MAX_BEST_BETS_PER_SLATE,
                      "max_plays": C.MAX_PLAYS_PER_SLATE,
                      "max_slate_exposure_pct": C.MAX_SLATE_EXPOSURE_PCT,
+                     "divergence_gap": C.DIVERGENCE_MEDIAN_GAP,
                      "n_sims": C.N_SIMS, "season": C.SEASON},
         "record": perf.get("overall", {}),
         "predictions": {k: preds.get("overall", {}).get(k)
