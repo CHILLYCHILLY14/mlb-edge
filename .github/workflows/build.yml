@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/build.yml"
       - "pipeline/**"
+      - "scripts/**"
       - "tests/**"
       - "docs/*.js"
       - "docs/*.html"
@@ -50,6 +51,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +78,9 @@ jobs:
       - name: Self-test (date resolution)
         run: node tests/test_schedule.mjs
 
+      - name: Self-test (scheduled build runner)
+        run: bash tests/test_build_runner.sh
+
       - name: Self-test (browser simulator matches the build engine)
         run: node tests/test_sim.mjs docs/data || true
 
@@ -83,13 +88,16 @@ jobs:
         env:
           MLB_BANKROLL: ${{ vars.MLB_BANKROLL || '250' }}
           MLB_SEASON: ${{ vars.MLB_SEASON || '2026' }}
-        run: |
-          python -m pipeline.build \
-            ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }} \
-            ${{ github.event.inputs.days && format('--days {0}', github.event.inputs.days) || '' }}
+          # These are blank on a scheduled/push run. Keeping the GitHub
+          # expression out of the shell command prevents an empty or malformed
+          # dispatch value from changing how bash parses the command.
+          BUILD_DATE: ${{ inputs.date }}
+          BUILD_DAYS: ${{ inputs.days }}
+        run: bash scripts/run_build.sh
 
-      - name: Grade yesterday
-        run: python -m pipeline.build --date $(date -u -d 'yesterday' +%F) --days 1 || true
+      # Do not run a second build for yesterday here. pipeline.build already
+      # grades every finished date in the ledgers. A second build also replaces
+      # index.json/latest.json with yesterday, making the live site go backward.
 
       - name: Commit feed, ledger and prediction history
         run: |
