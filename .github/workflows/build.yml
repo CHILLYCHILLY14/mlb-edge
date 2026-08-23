@@ -12,16 +12,19 @@ on:
     - cron: "0 22 * * *"    #  6:00 PM ET  - close to first pitch
     - cron: "30 23 * * *"   #  7:30 PM ET
     - cron: "0 2 * * *"     # 10:00 PM ET  - late slate
-    - cron: "0 8 * * *"     #  4:00 AM ET  - grade yesterday
+    # The gap between the late build and the morning one used to run six hours,
+    # so anyone opening the page in the small hours found the newest slate was
+    # still yesterday's and the Today button appeared to go backwards.
+    - cron: "20 4 * * *"    # 12:20 AM ET  - build the new day as soon as it starts
+    - cron: "0 8 * * *"     #  4:00 AM ET  - grade yesterday, rebuild
   workflow_dispatch:
     inputs:
       date:
         description: "Slate date (YYYY-MM-DD, blank = today)"
         required: false
       days:
-        description: "How many days to build"
+        description: "How many days to build (blank = the config default)"
         required: false
-        default: "2"
 
 permissions:
   contents: write
@@ -58,6 +61,12 @@ jobs:
       - name: Self-test (dashboard ledger)
         run: node tests/test_ledger.mjs
 
+      - name: Self-test (date resolution)
+        run: node tests/test_schedule.mjs
+
+      - name: Self-test (browser simulator matches the build engine)
+        run: node tests/test_sim.mjs docs/data || true
+
       - name: Build slate
         env:
           MLB_BANKROLL: ${{ vars.MLB_BANKROLL || '250' }}
@@ -65,16 +74,16 @@ jobs:
         run: |
           python -m pipeline.build \
             ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }} \
-            --days ${{ github.event.inputs.days || '2' }}
+            ${{ github.event.inputs.days && format('--days {0}', github.event.inputs.days) || '' }}
 
       - name: Grade yesterday
         run: python -m pipeline.build --date $(date -u -d 'yesterday' +%F) --days 1 || true
 
-      - name: Commit feed and ledger
+      - name: Commit feed, ledger and prediction history
         run: |
           git config user.name  "mlb-edge-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -A docs/data data/shadow.json
+          git add -A docs/data data/shadow.json data/predictions.json
           if git diff --staged --quiet; then
             echo "nothing changed"
           else
