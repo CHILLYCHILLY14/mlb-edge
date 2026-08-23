@@ -286,7 +286,8 @@ When you get a new `mlb-edge.zip`:
    folder.** Those two files in your repo hold every graded bet call and every
    graded game prediction the model has made. The copies in the zip are empty and
    would wipe your history — including the accuracy record the model corrects
-   itself from.
+   itself from. (If you forget, or if they were never there in the first place,
+   the build no longer breaks over it — it recreates them empty and carries on.)
 4. In your repo: **Add file** → **Upload files**.
 5. Select everything inside the new unzipped folder and drag it in. Same-named
    files are replaced; your history is untouched.
@@ -304,7 +305,9 @@ seeing it, updated.
 
 | What you see | What it means | What to do |
 |---|---|---|
-| Red ✗ on the workflow run | the build failed | Click the run → click the red step → read the last few red lines. Most often a data source was briefly down; just run it again. |
+| Red ✗ on the workflow run | the build failed | See **Reading a failed run** just below this table. Most often a data source was briefly down; running it again fixes it. |
+| Amber ⚠ on a **Self-test** step | an internal check drifted | Not a failure. The site still builds and deploys. Worth telling me about, not worth stopping for. |
+| `Get Pages site failed` | Pages was never switched on | Settings → Pages → Source = **GitHub Actions**, then run the workflow again. |
 | "No feed for this date yet" | no build has finished for that date | Actions → Run workflow, wait for the green tick, refresh. |
 | Page loads but every game says **no price** | ESPN had no odds posted yet | Normal early in the morning. Odds appear through the day; the next build picks them up. |
 | **404** at your github.io address | Pages is not switched on, or the first build has not finished | Settings → Pages → Source = **GitHub Actions**, then run the workflow. |
@@ -321,9 +324,26 @@ seeing it, updated.
 | **Learning from it: not applied yet** | fewer than 150 games graded so far | It fills up on its own — about a week and a half of full slates. |
 | A club shows a big **run bias** | the model consistently misreads that roster | Worth knowing before you back them. It usually shrinks as the sample grows. |
 
-**Reading a failed run:** Actions → click the run → click **build** → the step
-with the red ✗ opens to show the log. The useful line is usually the last one
-that is not indented.
+### Reading a failed run
+
+Two places to look, in this order.
+
+**1. The Summary page.** Actions → click the run → the **Summary** page opens
+first. Every run now writes a short "MLB Edge build" block there: which date it
+built, how many games, how many were priced, how much was staked. If that block
+is there, the model itself ran fine even if something later went red.
+
+**2. The red step.** On the same run page, click **build** in the left column.
+Each step is a line you can click open. The one with the red ✗ is the one that
+broke. Scroll to the bottom of it — the useful line is almost always the last
+one that is *not* indented.
+
+An amber ⚠ on a step named **Self-test** is not a failure. Those four steps
+report, they do not gate: the site still builds and deploys. They are there so
+you can see when something has drifted, not to stop your dashboard updating.
+
+**If you want me to fix it:** copy the last ten or so lines out of the red step
+and paste them to me. Everything else is guesswork without them.
 
 ---
 
