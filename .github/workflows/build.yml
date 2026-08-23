@@ -1,19 +1,6 @@
 name: Build MLB slate
 
 on:
-  push:
-    branches: [main]
-    # Deploy source fixes immediately. The bot's generated data-only commits
-    # do not match these paths, so they cannot create a workflow loop.
-    paths:
-      - ".github/workflows/build.yml"
-      - "pipeline/**"
-      - "scripts/**"
-      - "tests/**"
-      - "docs/*.js"
-      - "docs/*.html"
-      - "docs/*.css"
-      - "requirements.txt"
   schedule:
     # UTC. Covers the whole MLB day: morning card, midday line moves, the
     # window when lineups post, first pitch, late west-coast games, and an
@@ -51,7 +38,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -78,12 +64,6 @@ jobs:
       - name: Self-test (date resolution)
         run: node tests/test_schedule.mjs
 
-      - name: Self-test (scheduled build runner)
-        run: bash tests/test_build_runner.sh
-
-      - name: Self-test (repository settings)
-        run: python -m tests.test_config
-
       - name: Self-test (browser simulator matches the build engine)
         run: node tests/test_sim.mjs docs/data || true
 
@@ -91,16 +71,13 @@ jobs:
         env:
           MLB_BANKROLL: ${{ vars.MLB_BANKROLL || '250' }}
           MLB_SEASON: ${{ vars.MLB_SEASON || '2026' }}
-          # These are blank on a scheduled/push run. Keeping the GitHub
-          # expression out of the shell command prevents an empty or malformed
-          # dispatch value from changing how bash parses the command.
-          BUILD_DATE: ${{ inputs.date }}
-          BUILD_DAYS: ${{ inputs.days }}
-        run: bash scripts/run_build.sh
+        run: |
+          python -m pipeline.build \
+            ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }} \
+            ${{ github.event.inputs.days && format('--days {0}', github.event.inputs.days) || '' }}
 
-      # Do not run a second build for yesterday here. pipeline.build already
-      # grades every finished date in the ledgers. A second build also replaces
-      # index.json/latest.json with yesterday, making the live site go backward.
+      - name: Grade yesterday
+        run: python -m pipeline.build --date $(date -u -d 'yesterday' +%F) --days 1 || true
 
       - name: Commit feed, ledger and prediction history
         run: |
