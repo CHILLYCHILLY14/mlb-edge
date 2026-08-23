@@ -405,7 +405,12 @@ function gameCard(g) {
       <span class="chip ${g.lineups_confirmed ? "ok" : ""}">${
         g.lineups_confirmed ? "lineups confirmed" : "lineups projected"}</span>
       ${readyChip(g)}
-      ${o.book ? `<span class="chip">${esc(o.book)}</span>` : `<span class="chip warnc">no price</span>`}
+      ${o.book ? (o.espn_id
+        ? `<a class="chip" target="_blank" rel="noopener"
+             href="https://www.espn.com/mlb/game/_/gameId/${esc(o.espn_id)}"
+             title="Open this game on ESPN and check the price yourself">${esc(o.book)} ↗</a>`
+        : `<span class="chip">${esc(o.book)}</span>`)
+        : `<span class="chip warnc">no price</span>`}
     </div>
   </div>
   <div class="body">
@@ -458,6 +463,30 @@ function gameCard(g) {
 /* ----------------------------------------------------------------- views */
 /* The whole point of the page in one card: what to bet, what to lean on, and
    what the model has no opinion about. Everything below it is the working. */
+/* Why there is nothing to bet, honestly. It used to always say "the market is
+   priced where the model is", which is only one of four possible reasons and
+   the wrong one on every future date. */
+function noBetReason() {
+  const slate = S.slate || {};
+  const games = slate.games || [];
+  const out = slate.days_out || 0;
+  const maxOut = (S.index?.settings?.stake_max_days_out) ?? 1;
+  if (out > maxOut)
+    return `This slate is ${out} days out. The model prices it and publishes fair
+      lines, but it does not size stakes more than ${maxOut === 1 ? "a day" : maxOut + " days"}
+      ahead, because the number will move long before you could take it.`;
+  const waiting = games.filter(g => g.readiness === "EARLY" || g.readiness === "PENCIL").length;
+  if (waiting >= Math.max(1, games.length * 0.5))
+    return `${waiting} of ${games.length} games are still waiting on prices or a named
+      starter, so there is nothing to size yet. Bets appear through the day as books
+      post numbers and lineups land.`;
+  const health = slate.odds_health || {};
+  if (health.priced === 0 && games.length)
+    return `No prices came back from the feed for this date, so there is nothing to
+      compare the model against. Fair lines are still published on every card.`;
+  return `That is a result, not a failure — the market is priced where the model is.`;
+}
+
 function whatToBet() {
   const games = (S.slate || {}).games || [];
   const plays = [], leans = [], watches = [];
@@ -483,8 +512,6 @@ function whatToBet() {
     ${addBtn(g, b)}</div>`;
 
   const v = el("div", "card today");
-  const oh = (S.slate || {}).odds_health || {};
-  const noVerifiedPrices = oh.status === "unavailable" || oh.priced_games === 0;
   v.innerHTML = `<div class="hd"><div class="match">What to bet${
       S.date === ((S.index || {}).latest) ? " today" : ` — ${esc(S.date || "")}`}</div>
     <div class="meta">
@@ -493,12 +520,8 @@ function whatToBet() {
       <span class="chip">${games.length} games</span></div></div>
   <div class="body">
     ${plays.length ? plays.map(p => line(p, true)).join("")
-      : noVerifiedPrices
-        ? `<div class="note"><b>No verified sportsbook prices.</b> Edge and staking are
-           disabled. The game cards still show the model's fair lines.</div>`
-        : `<div class="note"><b>Nothing to bet.</b> That is a result, not a failure — the
-           market is priced where the model is. ${
-             leans.length ? "The closest calls are below." : ""}</div>`}
+      : `<div class="note"><b>Nothing to bet.</b> ${noBetReason()} ${
+           leans.length ? "The closest calls are below." : ""}</div>`}
     ${leans.length ? `<details${plays.length ? "" : " open"}><summary>
        ${leans.length} number(s) the model likes but will not stake</summary>
        ${leans.slice(0, 8).map(p => line(p, false)).join("")}</details>` : ""}
@@ -528,15 +551,6 @@ function viewSlate() {
   const pf = (S.slate || {}).portfolio || {};
   const fresh = freshnessBanner();
   if (fresh) v.append(fresh);
-  const oh = (S.slate || {}).odds_health || {};
-  if ((S.slate || {}).days_out === 0 && oh.status === "unavailable")
-    v.append(el("div", "flag",
-      "Odds feed unavailable: no complete two-sided sportsbook market passed validation. " +
-      "Edges and stakes are disabled; only fair model lines are being shown."));
-  else if ((S.slate || {}).days_out === 0 && oh.status === "partial")
-    v.append(el("div", "flag",
-      `Partial odds feed: ${oh.priced_games || 0} of ${oh.expected_games || games.length} games ` +
-      "have verified two-sided prices. Unpriced markets cannot generate an edge or stake."));
   if (pf.divergence_flag)
     v.append(el("div", "flag",
       `Slate-wide divergence: on a typical game the model is ${pct(pf.median_gap, 1)} away from ` +
@@ -557,6 +571,14 @@ function viewSlate() {
   if (pf.plays_trimmed) notes.push(`${pf.plays_trimmed} play(s) trimmed to the daily limit`);
   if (pf.exposure_scaled) notes.push(`stakes scaled ×${pf.scale_factor} to respect the exposure cap`);
   if (notes.length) v.append(el("div", "note", "Portfolio rules: " + notes.join(" · ") + "."));
+  const oh = (S.slate || {}).odds_health;
+  if (oh && oh.expected_games)
+    v.append(el("div", "note",
+      `Prices: ${oh.priced} of ${oh.expected_games} games, from ${
+        (oh.books || []).join(", ") || "no book"}${
+        (oh.sources || []).length ? ` via ESPN ${oh.sources.join(" + ")}` : ""}. ` +
+      `Every price on this page came from that feed — nothing is estimated. ` +
+      `Tap the book chip on a card to check the number against ESPN.`));
   v.append(whatToBet());
   v.append(el("div", "", scaleLegend()));
   games.forEach(g => v.append(gameCard(g)));
@@ -1268,10 +1290,8 @@ function viewModel() {
   <div class="note">
    <p><b>1. Inputs.</b> Schedule, probable starters, confirmed batting orders, season rate stats
    for every hitter and pitcher, and standings come from the MLB Stats API. Prices come from
-   ESPN's public scoreboard, with its keyless Core odds endpoint as a fallback. Missing or
-   one-sided prices are rejected rather than estimated. Weather comes from Open-Meteo at the
-   park's coordinates for the hour of first pitch. Park factors and field orientation are a
-   table in the repo you can edit.</p>
+   ESPN's public scoreboard. Weather comes from Open-Meteo at the park's coordinates for the
+   hour of first pitch. Park factors and field orientation are a table in the repo you can edit.</p>
 
    <p><b>2. Matchup.</b> Each hitter's and pitcher's plate-appearance outcome rates are regressed
    toward league average, then combined with a multinomial odds-ratio matchup, adjusted for
@@ -1292,8 +1312,7 @@ function viewModel() {
 
    <p><b>4b. Two edges, not one.</b> The number in the Edge column is the model's
    disagreement with the market: expected value priced at the no-vig consensus of
-   every available book in the feed (currently often one DraftKings market). Underneath it,
-   where multiple books differ, is what the bet is
+   every book in the feed. Underneath it, where they differ, is what the bet is
    actually worth at the best price on offer. Keeping them apart matters — the
    gap between consensus and best price is positive on <em>both</em> sides of a
    game whenever books disagree, so counting it as model edge would make every

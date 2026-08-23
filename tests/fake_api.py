@@ -232,7 +232,9 @@ def _espn(date_str):
                                  "spreadOdds": rng.choice([-135, 145])},
                 "homeTeamOdds": {"moneyLine": ml_h - jitter,
                                  "spreadOdds": rng.choice([-135, 145])}})
-        events.append({"id": str(rng.randint(1, 10**6)), "competitions": [{
+        eid = 900000 + abs(hash((date_str, away, home))) % 90000
+        CORE_PRICES[eid] = (ml_a, ml_h, base_total)
+        events.append({"id": str(eid), "competitions": [{"id": str(eid),
             "competitors": [
                 {"homeAway": "home", "team": {"abbreviation": TEAM_ABBR[home]}, "score": None},
                 {"homeAway": "away", "team": {"abbreviation": TEAM_ABBR[away]}, "score": None}],
@@ -268,6 +270,10 @@ FINAL_DATES: set[str] = set()
 # hand-rolled linear market invents. Left empty, the linear fallback is used,
 # which is what the test suite wants: it exercises the extremes on purpose.
 MARKET_OVERRIDE: dict[tuple, float] = {}
+
+# event id -> (away moneyline, home moneyline, total), filled in when the fake
+# scoreboard is built so the fake core endpoint can quote the same game.
+CORE_PRICES: dict[int, tuple] = {}
 
 
 def responder(url: str, **kw):
@@ -346,6 +352,28 @@ def responder(url: str, **kw):
             return {"teams": teams}
         if "/stats?" in url:
             return {"stats": []}
+    if "sports.core.api.espn.com" in url:
+        # Priced off the same game the scoreboard priced, jittered. Pricing it
+        # at random invented arbitrages that do not happen on a real board and
+        # made the sanity guard look broken when it was not.
+        # ESPN's per-game odds endpoint. Returns one provider, sometimes none -
+        # the model has to survive both, because making this the only source is
+        # what emptied the live feed.
+        m = re.search(r"/events/(\d+)/", url)
+        eid = int(m.group(1)) if m else 0
+        quote = CORE_PRICES.get(eid)
+        rng = random.Random(eid)
+        if quote is None or rng.random() < 0.25:
+            return {"count": 0, "items": []}       # ESPN often has nothing here
+        ml_a, ml_h, tot = quote
+        shade = rng.choice([-6, -3, 0, 3, 6])
+        return {"count": 1, "items": [{
+            "provider": {"name": "Core Feed"},
+            "details": "HOME -1.5", "spread": -1.5,
+            "overUnder": tot, "overOdds": -110, "underOdds": -110,
+            "awayTeamOdds": {"moneyLine": ml_a + shade, "spreadOdds": -130},
+            "homeTeamOdds": {"moneyLine": ml_h - shade, "spreadOdds": 110}}]}
+
     if "site.api.espn.com" in url:
         d = re.search(r"dates=(\d{8})", url).group(1)
         return _espn(f"{d[:4]}-{d[4:6]}-{d[6:]}")

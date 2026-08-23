@@ -41,7 +41,7 @@ adjustment. That is a regression on aggregates. This one plays the game.
 | Every game | not tracked | predicted and scored whether or not you bet it |
 | Learning | none | bounded corrections learned from its own graded history |
 | Horizon | today | a week ahead, labeled by how complete each game's picture is |
-| Books | one number | every provider ESPN currently returns, labeled by source; often DraftKings only |
+| Books | one number | every provider ESPN returns: consensus to grade against, best price to bet |
 | Bullpen | season ERA | who is actually available after the last three days of work |
 | Form | season only | season plus a rolling 30-day window |
 | Platoon | generic constant | each hitter's real numbers against that hand |
@@ -260,13 +260,11 @@ minutes, rolls over by itself at midnight, refreshes when the tab comes back to
 the foreground, and says so plainly when the feed is stale or today's slate has
 not been built yet.
 
-**Verified pricing, still keyless.** ESPN's free scoreboard returns one or more
-providers; in the current feed that is often DraftKings only. The model reads
-the current nested payload and the older shapes, requires both sides of a market,
-de-vigs each available provider, and takes the median when more than one exists.
-ESPN's keyless Core endpoint is the fallback after the scoreboard removes prices
-at first pitch. Missing prices stay missing — they are never replaced with a
-made-up -110 — and cannot generate an edge or stake.
+**Consensus pricing, still keyless.** ESPN's free scoreboard returns several
+sportsbooks in one call. The model de-vigs each, takes the median as the market's
+real opinion, and grades edges against that — while showing the best price on
+offer and which book has it. Grading against the best price instead would
+manufacture an edge on every game just by shopping.
 
 **More markets from the same simulation.** First five innings, no-run-first-inning,
 team totals and shutout odds all fall out of the same run distribution, so they
