@@ -5,6 +5,7 @@ the pricing, the grading and the JSON contract are all testable in CI.
 """
 from __future__ import annotations
 import json, random, re
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from pipeline.sources.mlb_api import TEAM_ABBR
@@ -135,7 +136,7 @@ def _rescale(st: dict, denom_key: str, target: int) -> dict:
 
 
 def _matchups(date_str):
-    rng = random.Random(hash(date_str) & 0xFFFF)
+    rng = random.Random(_h(date_str) & 0xFFFF)
     ids = TEAM_IDS[:]
     rng.shuffle(ids)
     return [(ids[i], ids[i + 1]) for i in range(0, 30, 2)]
@@ -145,10 +146,10 @@ def _schedule(date_str, final=False):
     games = []
     base = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc) + timedelta(hours=23)
     for n, (away, home) in enumerate(_matchups(date_str)):
-        rng = random.Random(hash((date_str, away, home)) & 0xFFFFFF)
+        rng = random.Random(_h(date_str, away, home) & 0xFFFFFF)
         venue = VENUE_FOR[home]
         pk = P.lookup(venue)
-        gp = 800000 + n + (hash(date_str) & 0xFFFF)
+        gp = 800000 + n + (_h(date_str) & 0xFFFF)
         g = {
             "gamePk": gp, "gameDate": (base + timedelta(minutes=15 * n)).isoformat().replace("+00:00", "Z"),
             "gameType": "R", "dayNight": "night", "doubleHeader": "N",
@@ -200,10 +201,20 @@ def _standings():
     return {"records": recs}
 
 
+def _h(*parts) -> int:
+    """A hash that is the same on every run.
+
+    Python randomises str.hash per process, so the fixture used to generate
+    different game ids and different odds on every invocation - which makes a
+    failing test unreproducible and a passing one worth very little.
+    """
+    return zlib.crc32("|".join(str(p) for p in parts).encode())
+
+
 def _espn(date_str):
     events = []
     for away, home in _matchups(date_str):
-        rng = random.Random(hash((date_str, away, home, "odds")) & 0xFFFFFF)
+        rng = random.Random(_h(date_str, away, home, "odds") & 0xFFFFFF)
         # a market that is roughly right, the way a real one is: price off the
         # talent gap plus home field, then add a little noise and some vig
         override = MARKET_OVERRIDE.get((TEAM_ABBR[away], TEAM_ABBR[home]))
@@ -236,6 +247,15 @@ def _espn(date_str):
         # publishes 0 across the board. That zero reached the decimal-payout
         # conversion and divided by zero, killing a whole live build, so the
         # fixture carries one on every third game to keep the path exercised.
+        # Real books very often post a moneyline and a total LINE while the
+        # run-line and over/under PRICES are still absent. That used to be
+        # backfilled with an invented -110; the fixture reproduces it so the
+        # test can prove nothing is invented any more.
+        if (900000 + _h(date_str, away, home) % 90000) % 4 == 1:
+            for blk in odds_blocks:
+                blk["overOdds"] = blk["underOdds"] = None
+                blk["awayTeamOdds"]["spreadOdds"] = None
+                blk["homeTeamOdds"]["spreadOdds"] = None
         if len(events) % 3 == 0:
             odds_blocks.insert(0, {
                 "provider": {"name": "Unhung Book"},
@@ -244,7 +264,7 @@ def _espn(date_str):
                 "overOdds": 0, "underOdds": 0,
                 "awayTeamOdds": {"moneyLine": 0, "spreadOdds": 0},
                 "homeTeamOdds": {"moneyLine": 0, "spreadOdds": 0}})
-        eid = 900000 + abs(hash((date_str, away, home))) % 90000
+        eid = 900000 + _h(date_str, away, home) % 90000
         CORE_PRICES[eid] = (ml_a, ml_h, base_total)
         events.append({"id": str(eid), "competitions": [{"id": str(eid),
             "competitors": [
@@ -379,12 +399,21 @@ def responder(url: str, **kw):
             return {"count": 0, "items": []}       # ESPN often has nothing here
         ml_a, ml_h, tot = quote
         shade = rng.choice([-6, -3, 0, 3, 6])
+        # Real books post a moneyline long before they post a run line or a
+        # total price. On a deterministic slice of the slate this feed does the
+        # same, so the "no price, therefore no bet" path is covered end to end
+        # instead of being papered over by whichever source happens to have one.
+        bare = (eid % 4 == 1)
         return {"count": 1, "items": [{
             "provider": {"name": "Core Feed"},
             "details": "HOME -1.5", "spread": -1.5,
-            "overUnder": tot, "overOdds": -110, "underOdds": -110,
-            "awayTeamOdds": {"moneyLine": ml_a + shade, "spreadOdds": -130},
-            "homeTeamOdds": {"moneyLine": ml_h - shade, "spreadOdds": 110}}]}
+            "overUnder": tot,
+            "overOdds": None if bare else -110,
+            "underOdds": None if bare else -110,
+            "awayTeamOdds": {"moneyLine": ml_a + shade,
+                             "spreadOdds": None if bare else -130},
+            "homeTeamOdds": {"moneyLine": ml_h - shade,
+                             "spreadOdds": None if bare else 110}}]}
 
     if "site.api.espn.com" in url:
         d = re.search(r"dates=(\d{8})", url).group(1)

@@ -864,7 +864,8 @@ def main(argv=None):
                      "max_slate_exposure_pct": C.MAX_SLATE_EXPOSURE_PCT,
                      "divergence_gap": C.DIVERGENCE_MEDIAN_GAP,
                      "stake_max_days_out": C.STAKE_MAX_DAYS_OUT,
-                     "n_sims": C.N_SIMS, "season": C.SEASON},
+                     "n_sims": C.N_SIMS, "season": C.SEASON,
+                     "preferred_book": C.PREFERRED_BOOK},
         "record": perf.get("overall", {}),
         "predictions": {k: preds.get("overall", {}).get(k)
                         for k in ("n", "accuracy", "brier", "mae_total")},

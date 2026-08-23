@@ -242,6 +242,38 @@ being applied and where it came from.
 
 Then run the workflow once so it picks the change up.
 
+### Which sportsbook's prices you see
+
+Every price on a card is **DraftKings'** by default, so the number the model
+shows is the number in your app. To change that:
+
+1. In your repo click **pipeline**, then **config.py**.
+2. Click the **pencil** icon.
+3. Find `PREFERRED_BOOK = "DraftKings"` near the top and change it to `"FanDuel"`,
+   `"ESPN BET"`, `"Caesars"`, `"BetMGM"` or `"Bet365"`.
+4. **Commit changes**, then Actions → **Run workflow**.
+
+Set it to `None` (no quotes) and the model goes back to showing the best price
+available anywhere in the feed.
+
+Two things worth knowing:
+
+- If your book has not posted a market, you get the best price that *is* posted,
+  and the chip on the card says `no DraftKings price` so you know why.
+- Where a different book has a better number, it is printed underneath in green
+  — that is money you are leaving on the table by not shopping.
+
+### Checking a price yourself
+
+Under every game there is a fold-out: **Every book's number for this game**.
+It is the raw feed, one row per book, with your book's row highlighted. If a
+number on a card is not somewhere in that table, that is a bug and worth telling
+me about.
+
+A dash in that table means the book has not posted that market. **The model never
+fills a dash in.** It prices its own fair line instead, marks it *fair (model)*,
+and does not bet it.
+
 ### Everything else: `pipeline/config.py`
 
 1. In your repo click **pipeline**, then **config.py**.
@@ -319,6 +351,8 @@ seeing it, updated.
 | A banner says the feed is hours old | the scheduled job is failing | Actions tab, open the newest run, read the red step. |
 | Red **divergence flag** banner | the model disagrees with the market on an unusual share of the slate | Usually a data problem, not free money. The model already capped its own best bets. Treat that day's edges with suspicion. |
 | Lots of games say **lineups projected** | batting orders are not posted yet | Normal until a few hours before first pitch. Best bets need confirmed starters, so more appear as the day goes on. |
+| A market shows no price at all | no book in the feed has posted that market yet | Expected on run lines and totals early in the day. The model publishes its fair line so you can shop it. It will not bet a market nobody has priced. |
+| A price does not match your app | your book had not posted it, so you are seeing another book's | The card names the book under every price, and the fold-out shows all of them. If your book's row has a number and the card shows a different one, that is a bug. |
 | Later days say **no prices yet** | books have not hung numbers that far out | Expected — books post two or three days ahead. The model publishes its own fair line so you can shop it when the number lands. |
 | Future days show no stakes at all | stakes are only sized for today and tomorrow | Deliberate: a price four days out will move before you can take it. Change `STAKE_MAX_DAYS_OUT` in `config.py` if you disagree. |
 | **Learning from it: not applied yet** | fewer than 150 games graded so far | It fills up on its own — about a week and a half of full slates. |
@@ -352,6 +386,8 @@ and paste them to me. Everything else is guesswork without them.
 | Term | Plain English |
 |---|---|
 | **Edge** | how much better the model thinks a price is than the book does, as a percentage of what you stake. `+3.2%` means the model expects to make 3.2 cents per dollar. |
+| **Book price** | a real number a named sportsbook is actually showing right now. If it says DraftKings, DraftKings is quoting it. |
+| **Fair (model)** | the model's own opinion of what the price *should* be. Not an offer from anyone. Never bet it as if it were. |
 | **Fair** | the price the model thinks the bet *should* be. If the book is longer than fair, that is where the edge comes from. |
 | **Model %** | the model's chance of the bet winning, after being pulled toward the market. |
 | **Market %** | the book's chance, with its own margin taken out. |

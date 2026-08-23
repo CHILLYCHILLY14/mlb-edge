@@ -274,6 +274,37 @@ function toast(html) {
   toastTimer = setTimeout(() => n.remove(), 4200);
 }
 
+/* Every book in the feed, exactly as it came back. This exists because a price
+   with no name attached is indistinguishable from a made-up one - and this
+   model did once invent -110 for run lines and totals nobody had priced.
+   Open it and the number on the card is somewhere in this table, or the model
+   has a bug worth reporting. */
+function boardTable(o) {
+  const rows = (o.board || []).filter(Boolean);
+  if (!rows.length) return "";
+  const p = v => (v == null ? "—" : (v > 0 ? "+" : "") + Math.round(v));
+  const pref = (o.preferred_book || "").toLowerCase();
+  const body = rows.map(r => `<tr${r.book && r.book.toLowerCase() === pref ? ' class="mine"' : ""}>
+      <td data-primary>${esc(r.book)}${
+        r.book && r.book.toLowerCase() === pref ? ' <span class="sup">yours</span>' : ""}</td>
+      <td class="num">${p(r.ml_away)}</td><td class="num">${p(r.ml_home)}</td>
+      <td class="num">${r.rl_line == null ? "—" : (r.rl_line > 0 ? "+" : "") + r.rl_line}</td>
+      <td class="num">${p(r.rl_home)}</td><td class="num">${p(r.rl_away)}</td>
+      <td class="num">${r.total == null ? "—" : r.total}</td>
+      <td class="num">${p(r.over)}</td><td class="num">${p(r.under)}</td></tr>`).join("");
+  return `<details class="board"><summary>Every book's number for this game (${rows.length})</summary>
+    <div class="scroll"><table class="rt"><thead><tr><th>Book</th>
+      <th class="num">ML away</th><th class="num">ML home</th>
+      <th class="num">RL</th><th class="num">RL home</th><th class="num">RL away</th>
+      <th class="num">Total</th><th class="num">Over</th><th class="num">Under</th>
+    </tr></thead><tbody>${body}</tbody></table></div>
+    <div class="note">A dash means that book has not posted that market yet. The model
+      never fills a dash in with a number - it prices its own fair line instead and
+      does not bet the market.${o.fetched_at
+        ? ` Pulled ${esc(new Date(o.fetched_at).toLocaleString())}.` : ""}</div>
+  </details>`;
+}
+
 function betRows(bets, g) {
   if (!bets || !bets.length) return `<div class="note">No prices available for this game yet.</div>`;
   // Qualified markets first and passed ones folded away. On a phone the full
@@ -282,8 +313,8 @@ function betRows(bets, g) {
   const live = bets.filter(b => b.tier !== "PASS");
   const dead = bets.filter(b => b.tier === "PASS");
   const table = rows => `<div class="scroll"><table class="rt">
-    <thead><tr><th>Market</th><th>Selection</th><th class="num">Book</th>
-      <th class="num">Fair</th><th class="num">Model</th>
+    <thead><tr><th>Market</th><th>Selection</th><th class="num">Book price</th>
+      <th class="num">Fair (model)</th><th class="num">Model</th>
       <th class="num hide-sm">Market</th>
       <th class="num">Edge</th><th class="hide-sm">Scale</th><th>Tier</th>
       <th class="num">Stake</th><th>Track</th></tr></thead>
@@ -297,8 +328,11 @@ function betRows(bets, g) {
     return `<tr>
       <td>${esc(b.market)}</td>
       <td data-primary>${esc(b.label)}${why}</td>
-      <td class="num">${esc(b.price_txt)}</td>
-      <td class="num">${esc(b.fair_price)}</td>
+      <td class="num">${esc(b.price_txt)}${
+        b.book ? `<br><span class="sup">${esc(b.book)}</span>` : ""}${
+        b.best_price_txt && b.best_price !== b.price
+          ? `<br><span class="sup better">${esc(b.best_price_txt)} at ${esc(b.best_book)}</span>` : ""}</td>
+      <td class="num">${esc(b.fair_price)}<br><span class="sup">model</span></td>
       <td class="num">${pct(b.p_final)}</td>
       <td class="num hide-sm">${b.p_market == null ? "—" : pct(b.p_market)}</td>
       <td class="num ${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%
@@ -411,6 +445,14 @@ function gameCard(g) {
              title="Open this game on ESPN and check the price yourself">${esc(o.book)} ↗</a>`
         : `<span class="chip">${esc(o.book)}</span>`)
         : `<span class="chip warnc">no price</span>`}
+      ${o.preferred_book && (o.books || []).some(
+          b => (b || "").toLowerCase() === o.preferred_book.toLowerCase())
+        ? `<span class="chip ok" title="Prices on this card are ${esc(o.preferred_book)}'s
+             wherever it has posted one">pricing ${esc(o.preferred_book)}</span>`
+        : (o.preferred_book
+            ? `<span class="chip warnc" title="${esc(o.preferred_book)} is not in the feed for
+                 this game, so you are seeing the best price on the board">no ${esc(
+                 o.preferred_book)} price</span>` : "")}
     </div>
   </div>
   <div class="body">
@@ -439,6 +481,7 @@ function gameCard(g) {
     ${distBars(g.hist, o.total)}
 
     ${betRows(g.bets, g)}
+    ${boardTable(o)}
 
     <div class="why">${esc(g.rationale)}</div>
 
@@ -610,8 +653,11 @@ function viewBets() {
     <tbody>${plays.map(({ g, b }) => `<tr>
       <td data-primary>${esc(g.away)}@${esc(g.home)} · ${esc(b.label)}</td>
       <td class="hide-sm">${esc(b.label)}</td>
-      <td class="num">${esc(b.price_txt)}</td>
-      <td class="num">${esc(b.fair_price)}</td>
+      <td class="num">${esc(b.price_txt)}${
+        b.book ? `<br><span class="sup">${esc(b.book)}</span>` : ""}${
+        b.best_price_txt && b.best_price !== b.price
+          ? `<br><span class="sup better">${esc(b.best_price_txt)} at ${esc(b.best_book)}</span>` : ""}</td>
+      <td class="num">${esc(b.fair_price)}<br><span class="sup">model</span></td>
       <td class="num">${pct(b.p_final)}</td>
       <td class="num ${sgn(b.edge)}">+${num(b.edge_pct, 2)}%</td>
       <td class="hide-sm">${edgeMeter(b.edge)}</td>
@@ -1313,11 +1359,21 @@ function viewModel() {
    <p><b>4b. Two edges, not one.</b> The number in the Edge column is the model's
    disagreement with the market: expected value priced at the no-vig consensus of
    every book in the feed. Underneath it, where they differ, is what the bet is
-   actually worth at the best price on offer. Keeping them apart matters — the
-   gap between consensus and best price is positive on <em>both</em> sides of a
+   actually worth at the price you are being shown. Keeping them apart matters —
+   the gap between consensus and best price is positive on <em>both</em> sides of a
    game whenever books disagree, so counting it as model edge would make every
    market look like a play. Bets qualify on the first number and are sized on the
    second.</p>
+
+   <p><b>4c. Whose price you are looking at.</b> Every number on a card comes from a
+   named sportsbook${st.preferred_book ? ` — ${esc(st.preferred_book)}'s wherever it has
+   posted one, because that is the number you will see when you go to bet` : ""}. Where
+   another book is offering better, it is printed underneath in green. The fold-out
+   under each game lists every book in the feed, so nothing has to be taken on trust.
+   A market no book has priced stays blank and is marked <em>fair (model)</em>: that is
+   the model's own opinion, not an offer, and it is never bet. This paragraph exists
+   because an earlier version filled missing run-line and total prices in with −110,
+   which made the model measure real edges against a market that did not exist.</p>
 
    <p><b>5. Edge and stake.</b> Raw expected value is squashed through tanh toward a hard ceiling
    of ${pct(st.edge_ceiling ?? 0.055, 1)}, and the stake is computed from the compressed number

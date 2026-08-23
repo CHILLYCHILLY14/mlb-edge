@@ -13,6 +13,29 @@ MAX_STAKE_PCT     = 0.05    # hard cap: 5% of bankroll on any single bet
 MIN_STAKE         = 1.00    # do not record a bet smaller than this
 STAKE_ROUNDING    = 0.50    # round stakes to nearest $0.50
 
+# --------------------------------------------------------------- your book ---
+# Which sportsbook's number you actually see when you go to bet. The dashboard
+# shows THIS book's price wherever it quotes the market, so the number on the
+# card is the number in your app. Where it has not posted one, you get the best
+# price any book in the feed is showing, labelled with whose it is.
+#
+# Set to None to always show the best available price across every book.
+# Spelling has to match ESPN's, which is why the aliases below exist.
+PREFERRED_BOOK    = "DraftKings"
+BOOK_ALIASES      = {
+    "draftkings": "DraftKings", "dk": "DraftKings",
+    "fanduel": "FanDuel", "fd": "FanDuel",
+    "espn bet": "ESPN BET", "espnbet": "ESPN BET",
+    "caesars": "Caesars", "william hill (new jersey)": "Caesars",
+    "betmgm": "BetMGM", "mgm": "BetMGM",
+    "bet365": "Bet365", "b365": "Bet365",
+}
+
+# A price is a price or it is nothing. Never invent one - a market with no book
+# behind it gets the model's own fair line, clearly labelled as a fair line, and
+# is not bettable. Leave this False. It exists only to name the rule.
+INVENT_MISSING_PRICES = False
+
 # ------------------------------------------------------------------ market ---
 # How much of the model-vs-market disagreement we keep. 0.40 market weight means
 # we keep 60% of our disagreement with the no-vig market price. MLB moneyline

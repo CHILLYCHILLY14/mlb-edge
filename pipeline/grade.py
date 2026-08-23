@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from . import config as C
-from .model.market import american_to_decimal, american_to_prob, no_vig
+from .model.market import american_to_decimal, price_ok, american_to_prob, no_vig
 from .sources.mlb_api import final_scores
 
 SHADOW = os.path.join(C.DATA_DIR, "shadow.json")
@@ -161,7 +161,13 @@ def _settle(r, f) -> dict | None:
         return None
 
     stake = float(r.get("stake") or 0.0)
-    price = float(r.get("close_price") or r.get("open_price") or -110)
+    # Settle at the price actually recorded. A call with no price stored is a
+    # call we could not have made, so it grades as no result rather than being
+    # scored at an assumed -110 and quietly polluting the accuracy record.
+    price = r.get("close_price") or r.get("open_price")
+    if not price_ok(price):
+        return None
+    price = float(price)
     if result == "win":
         pl = stake * (american_to_decimal(price) - 1.0)
     elif result == "loss":

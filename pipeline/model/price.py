@@ -8,7 +8,8 @@ from .market import (american_to_decimal, blend, cap_prob, compress, fmt_america
 
 
 def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
-         ctx, is_total=False, total_gap=None, book=None, line=None):
+         ctx, is_total=False, total_gap=None, book=None, line=None,
+         best_price=None, best_book=None):
     # Not just None: a feed publishing 0 for a market it has not hung yet, or a
     # typo pasted into manual_odds.json, must not become a bet. Anything that is
     # not a real American price is treated as no price at all - the model still
@@ -56,6 +57,13 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
     return {
         "market": market, "selection": selection, "label": label,
         "price": price, "price_txt": fmt_american(price), "book": book,
+        # What the same selection costs at the best book on the board. Shown
+        # only when it beats your book, so you can see when shopping pays.
+        "best_price": best_price if price_ok(best_price) else None,
+        "best_price_txt": fmt_american(best_price) if price_ok(best_price) else None,
+        "best_book": best_book,
+        "shop_gain": (round(american_to_decimal(best_price) - american_to_decimal(price), 3)
+                      if price_ok(best_price) and best_price != price else None),
         "line": line,
         "p_model": round(p_model, 4), "p_market": (round(p_market, 4) if p_market is not None else None),
         "p_final": round(p_final, 4),
@@ -97,10 +105,14 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
     mk_h = market("cons_home", ml_h, ml_a)
     bets.append(_bet("ML", away, f"{away} ML", ml_a, d["p_away"], mk_a,
                      C.MARKET_BLEND, C.EDGE_CEILING, ctx,
-                     book=odds.get("ml_away_book") or odds.get("book")))
+                     book=odds.get("ml_away_book"),
+                     best_price=odds.get("ml_away_best"),
+                     best_book=odds.get("ml_away_best_book")))
     bets.append(_bet("ML", home, f"{home} ML", ml_h, d["p_home"], mk_h,
                      C.MARKET_BLEND, C.EDGE_CEILING, ctx,
-                     book=odds.get("ml_home_book") or odds.get("book")))
+                     book=odds.get("ml_home_book"),
+                     best_price=odds.get("ml_home_best"),
+                     best_book=odds.get("ml_home_best_book")))
 
     # ----------------------------------------------------------- run line ---
     rl = odds.get("rl_line", -1.5)
@@ -108,9 +120,15 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
     mk_rh = market("cons_rl_home", rl_h, rl_a)
     mk_ra = market("cons_rl_away", rl_a, rl_h)
     bets.append(_bet("RL", home, f"{home} {rl:+.1f}", rl_h, d["p_home_rl"], mk_rh,
-                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, book=odds.get("book"), line=rl))
+                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, line=rl,
+                     book=odds.get("rl_home_book"),
+                     best_price=odds.get("rl_home_best"),
+                     best_book=odds.get("rl_home_best_book")))
     bets.append(_bet("RL", away, f"{away} {-rl:+.1f}", rl_a, d["p_away_rl"], mk_ra,
-                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, book=odds.get("book"), line=rl))
+                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, line=rl,
+                     book=odds.get("rl_away_book"),
+                     best_price=odds.get("rl_away_best"),
+                     best_book=odds.get("rl_away_best_book")))
 
     # -------------------------------------------------------------- total ---
     tot = odds.get("total")
@@ -120,12 +138,16 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
         mk_u = market("cons_under", odds.get("under"), odds.get("over"))
         bets.append(_bet("TOTAL", "Over", f"Over {tot}", odds.get("over"),
                          d["p_total_over"], mk_o, C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
-                         ctx, is_total=True, total_gap=gap,
-                         book=odds.get("total_book") or odds.get("book"), line=tot))
+                         ctx, is_total=True, total_gap=gap, line=tot,
+                         book=odds.get("over_book"),
+                         best_price=odds.get("over_best"),
+                         best_book=odds.get("over_best_book")))
         bets.append(_bet("TOTAL", "Under", f"Under {tot}", odds.get("under"),
                          d["p_total_under"], mk_u, C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
-                         ctx, is_total=True, total_gap=gap,
-                         book=odds.get("total_book") or odds.get("book"), line=tot))
+                         ctx, is_total=True, total_gap=gap, line=tot,
+                         book=odds.get("under_book"),
+                         best_price=odds.get("under_best"),
+                         best_book=odds.get("under_best_book")))
 
     # ---------------------------------------------------------- first five ---
     # ESPN does not publish F5 prices. If you paste them into data/manual_odds.json
@@ -142,12 +164,15 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
                          C.F5_BLEND, C.EDGE_CEILING, ctx, book=f5.get("book", "manual")))
     f5t = f5.get("total")
     if f5t is not None and "p_f5_over" in d:
-        mk_o, mk_u = no_vig(f5.get("over", -110), f5.get("under", -110))
+        # No -110 default. If you pasted a first-five total without prices, there
+        # is a line but no market to beat, and the model says so rather than
+        # pretending both sides are -110.
+        mk_o, mk_u = no_vig(f5.get("over"), f5.get("under"))
         gap = abs(d["mean_f5_total"] - f5t)
-        bets.append(_bet("F5 TOTAL", "Over", f"F5 Over {f5t}", f5.get("over", -110),
+        bets.append(_bet("F5 TOTAL", "Over", f"F5 Over {f5t}", f5.get("over"),
                          d["p_f5_over"], mk_o, C.F5_BLEND, C.EDGE_CEILING_TOT, ctx,
                          is_total=True, total_gap=gap, book=f5.get("book", "manual"), line=f5t))
-        bets.append(_bet("F5 TOTAL", "Under", f"F5 Under {f5t}", f5.get("under", -110),
+        bets.append(_bet("F5 TOTAL", "Under", f"F5 Under {f5t}", f5.get("under"),
                          d["p_f5_under"], mk_u, C.F5_BLEND, C.EDGE_CEILING_TOT, ctx,
                          is_total=True, total_gap=gap, book=f5.get("book", "manual"), line=f5t))
 

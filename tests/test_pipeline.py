@@ -163,6 +163,101 @@ def test_junk_prices():
     check("a real price still prices", real is not None and real["price"] == -110)
 
 
+def test_no_invented_prices():
+    """
+    Provenance: every price the dashboard shows must be findable on the board,
+    attached to a named book.
+
+    This exists because the feed used to backfill a missing run-line or total
+    price with -110. That invented number was de-vigged into a fake 50/50
+    market opinion, the model measured its edge against it, and a real line
+    could surface as a large edge that never existed anywhere.
+    """
+    print("\n[price provenance]")
+    patch()
+    from pipeline.sources import espn as E
+    from pipeline import config as C
+    recs = E.odds_for_date("2026-08-23")
+    check("the fixture slate produced records", len(recs) > 0, str(len(recs)))
+
+    SIDES = ("ml_away", "ml_home", "rl_home", "rl_away", "over", "under")
+    invented = orphaned = unnamed = 0
+    saw_missing = False
+    for key, r in recs.items():
+        board = r.get("board") or []
+        for side in SIDES:
+            v = r.get(side)
+            if v is None:
+                saw_missing = True
+                continue
+            if not any(b.get(side) == v for b in board):
+                invented += 1
+                print(f"    {key} {side}={v} is on no book's board")
+            bk = r.get(f"{side}_book")
+            if not bk:
+                unnamed += 1
+            elif not any(b.get("book") == bk and b.get(side) == v for b in board):
+                orphaned += 1
+        # The best price is chosen among the books posting the modal line, not
+        # the whole board, so it only has to be real and no worse than the
+        # headline you are being shown.
+        for side in SIDES:
+            best = r.get(f"{side}_best")
+            if best is None:
+                continue
+            if not any(b.get(side) == best for b in board):
+                orphaned += 1
+            elif E.american_decimal(best) < E.american_decimal(r[side]) - 1e-9:
+                orphaned += 1
+
+    check("no price is invented", invented == 0, f"{invented} unsourced")
+    check("every price names a real book", unnamed == 0 and orphaned == 0,
+          f"{unnamed} unnamed, {orphaned} mismatched")
+    check("a market with no book price stays empty", saw_missing,
+          "the fixture never exercised the missing-price path")
+
+    # the missing price must not become a bet
+    from pipeline.model.price import price_game
+    bare = {"ml_away": 120.0, "ml_home": -140.0, "cons_away": 0.44, "cons_home": 0.56,
+            "rl_line": -1.5, "rl_home": None, "rl_away": None,
+            "total": 8.5, "over": None, "under": None, "n_books": 1,
+            "books": ["DraftKings"], "board": []}
+    g = {"away": "ATL", "home": "MIL", "gamePk": 1, "away_sp": {"name": "x"},
+         "home_sp": {"name": "y"}, "odds_age_h": 0.2, "weather": {}}
+    d = {"p_away": 0.46, "p_home": 0.54, "p_home_rl": 0.40, "p_away_rl": 0.60,
+         "p_total_over": 0.52, "p_total_under": 0.48, "mean_total": 8.7, "se": 0.004}
+    bets = price_game(g, d, bare)
+    mkts = {b["market"] for b in bets}
+    check("no run-line bet without a run-line price", "RL" not in mkts, str(sorted(mkts)))
+    check("no total bet without a total price", "TOTAL" not in mkts, str(sorted(mkts)))
+    check("the moneyline it does have is still priced", "ML" in mkts)
+    for b in bets:
+        check(f"{b['label']} carries a real price", E.valid_price(b["price"]))
+
+    # your book wins the headline when it has posted a number
+    rows = [{"book": "FanDuel", "ml_away": -105, "ml_home": -115, "rl_line": -1.5,
+             "rl_home": 150, "rl_away": -180, "total": 8.5, "over": -110, "under": -110},
+            {"book": "DraftKings", "ml_away": -120, "ml_home": 100, "rl_line": -1.5,
+             "rl_home": 140, "rl_away": -217, "total": 8.5, "over": -105, "under": -115}]
+    con = E._consensus([dict(r) for r in rows], "MIL", "ATL")
+    check("your book is the headline price", con["rl_away"] == -217,
+          f"{con['rl_away']} from {con.get('rl_away_book')}")
+    check("the headline names your book", con["rl_away_book"] == "DraftKings",
+          str(con.get("rl_away_book")))
+    check("the better price elsewhere is still carried", con["rl_away_best"] == -180,
+          str(con.get("rl_away_best")))
+    check("and it names the book holding it", con["rl_away_best_book"] == "FanDuel",
+          str(con.get("rl_away_best_book")))
+    saved = C.PREFERRED_BOOK
+    try:
+        C.PREFERRED_BOOK = None
+        con2 = E._consensus([dict(r) for r in rows], "MIL", "ATL")
+        check("with no preferred book it shops for the best", con2["rl_away"] == -180,
+              str(con2["rl_away"]))
+    finally:
+        C.PREFERRED_BOOK = saved
+
+
 def test_weather_model():
     print("\n[weather]")
     from pipeline.sources import weather as W
@@ -246,8 +341,28 @@ def test_full_build():
           max(stakes) <= C.BANKROLL * C.MAX_STAKE_PCT + 1e-9, f"${max(stakes):.2f}")
     check("every game carries a rationale",
           all(len(g["rationale"]) > 60 for g in games))
-    check("every game prices ML, RL and TOTAL",
-          all({b["market"] for b in g["bets"]} >= {"ML", "RL", "TOTAL"} for g in games))
+    # A market appears when a book priced it and not otherwise. Demanding all
+    # three unconditionally is what the invented -110 was quietly satisfying.
+    def markets_ok(g):
+        have = {b["market"] for b in g["bets"]}
+        o = g.get("odds") or {}
+        want = set()
+        if o.get("ml_away") is not None:
+            want.add("ML")
+        if o.get("rl_home") is not None or o.get("rl_away") is not None:
+            want.add("RL")
+        if o.get("over") is not None or o.get("under") is not None:
+            want.add("TOTAL")
+        return have >= want
+    check("every market a book priced becomes a bet", all(markets_ok(g) for g in games))
+    check("a market no book priced becomes no bet",
+          all(not any(b["market"] == "RL" for b in g["bets"])
+              for g in games
+              if (g.get("odds") or {}).get("rl_home") is None
+              and (g.get("odds") or {}).get("rl_away") is None))
+    check("at least one game in the slate had an unpriced market",
+          any((g.get("odds") or {}).get("over") is None for g in games),
+          "the fixture no longer covers the missing-price path")
     check("F5 fair line published for every game",
           all(g["f5_fair"]["away"] and g["f5_fair"]["home"] for g in games))
     check("lineups flagged confirmed or projected",
@@ -526,6 +641,7 @@ if __name__ == "__main__":
     test_simulator_physics()
     test_market_math()
     test_junk_prices()
+    test_no_invented_prices()
     test_weather_model()
     test_full_build()
     print("\n" + ("=" * 60))

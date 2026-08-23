@@ -7,6 +7,7 @@ them and returns a single normalised record per game.
 from __future__ import annotations
 from datetime import datetime, timezone
 
+from .. import config as C
 from .http import get_json
 
 SB = ("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
@@ -71,7 +72,7 @@ def _ml_from(o):
     return a, h
 
 
-def _runline_from(o, home_abbr, away_abbr):
+def _runline_from(o, home_abbr, away_abbr, ml_away=None, ml_home=None):
     """
     (run_line_as_it_applies_to_HOME, home_price, away_price).
 
@@ -96,7 +97,13 @@ def _runline_from(o, home_abbr, away_abbr):
             line = +mag                     # home is the underdog: +1.5
         elif fav == home_abbr:
             line = -mag
-        else:                               # no favourite named; trust the sign
+        elif ml_away is not None and ml_home is not None:
+            # No favourite named in `details`, so do not trust the sign - ESPN
+            # writes the spread from the favourite's side, and taking it as the
+            # home line silently inverts the run line on every game the road
+            # team is favoured in. The moneyline says who the favourite is.
+            line = -mag if ml_home < ml_away else +mag
+        else:                               # nothing to go on; trust the sign
             line = raw
     hp = _price((o.get("homeTeamOdds") or {}).get("spreadOdds"))
     ap = _price((o.get("awayTeamOdds") or {}).get("spreadOdds"))
@@ -139,7 +146,7 @@ def _books_from(comp, home_abbr, away_abbr) -> list[dict]:
     books = []
     for o in (comp.get("odds") or []):
         ml_a, ml_h = _ml_from(o)
-        rl, rl_h, rl_a = _runline_from(o, home_abbr, away_abbr)
+        rl, rl_h, rl_a = _runline_from(o, home_abbr, away_abbr, ml_a, ml_h)
         tot, ov, un = _total_from(o)
         name = ((o.get("provider") or {}).get("name") or "book")
         if ml_a is None and tot is None:
@@ -209,7 +216,10 @@ def american_decimal(a: float) -> float:
 
 def _devig_pair(pa, pb):
     """Power-method de-vig, kept local so this module has no model imports."""
-    if pa is None or pb is None:
+    # Not just None. A pair of zeros used to fall through to the (0.5, 0.5)
+    # bail-out at the bottom, which is a fabricated 50/50 market opinion born
+    # from a book that had not posted the game at all.
+    if not valid_price(pa) or not valid_price(pb):
         return None, None
     ia = 100.0 / (pa + 100.0) if pa > 0 else abs(pa) / (abs(pa) + 100.0)
     ib = 100.0 / (pb + 100.0) if pb > 0 else abs(pb) / (abs(pb) + 100.0)
@@ -229,6 +239,47 @@ def _devig_pair(pa, pb):
     return a / s, b / s
 
 
+def canon_book(name) -> str:
+    """ESPN's spelling -> one canonical name, so 'draftkings' and 'DraftKings'
+    are the same book when we go looking for yours."""
+    n = (name or "").strip()
+    return C.BOOK_ALIASES.get(n.lower(), n)
+
+
+def _pick_side(rows, key):
+    """
+    Which price to show for one selection, and whose it is.
+
+    Returns (price, book, best_price, best_book).
+
+    Your book's number is the headline whenever it has posted one, because that
+    is the number you will see when you go to bet. The best price on the board
+    is carried alongside it so the card can tell you when shopping is worth it.
+    Nothing here ever invents a number: no book, no price.
+    """
+    cands = [(float(b[key]), canon_book(b.get("book")))
+             for b in rows if valid_price(b.get(key))]
+    if not cands:
+        return None, None, None, None
+    best_p, best_b = max(cands, key=lambda t: american_decimal(t[0]))
+    pref = getattr(C, "PREFERRED_BOOK", None)
+    if pref:
+        want = canon_book(pref).lower()
+        for p, bk in cands:
+            if bk.lower() == want:
+                return p, bk, best_p, best_b
+    return best_p, best_b, best_p, best_b
+
+
+def _side(out, name, rows, key):
+    """Write one selection's price, its book, and the best price on the board."""
+    p, bk, bp, bb = _pick_side(rows, key)
+    out[name] = p
+    out[f"{name}_book"] = bk
+    out[f"{name}_best"] = bp
+    out[f"{name}_best_book"] = bb
+
+
 def _consensus(books: list[dict], home_abbr, away_abbr) -> dict:
     """
     Collapse several books into one market view.
@@ -242,25 +293,33 @@ def _consensus(books: list[dict], home_abbr, away_abbr) -> dict:
     """
     if not books:
         return {}
+    for b in books:
+        b["book"] = canon_book(b.get("book"))
     out = {"books": [b["book"] for b in books], "n_books": len(books)}
+
+    # The whole board, exactly as the feed gave it. Published so every number on
+    # a card can be traced to a named book instead of asking you to trust it.
+    out["board"] = [{"book": b["book"],
+                     "ml_away": b["ml_away"], "ml_home": b["ml_home"],
+                     "rl_line": b["rl_line"],
+                     "rl_home": b["rl_home"], "rl_away": b["rl_away"],
+                     "total": b["total"], "over": b["over"], "under": b["under"]}
+                    for b in books]
 
     # ---- moneyline
     pa = [_devig_pair(b["ml_away"], b["ml_home"])[0] for b in books]
     ph = [_devig_pair(b["ml_away"], b["ml_home"])[1] for b in books]
     out["cons_away"], out["cons_home"] = _median(pa), _median(ph)
-    ml_a, _ = _best_price([b["ml_away"] for b in books])
-    ml_h, _ = _best_price([b["ml_home"] for b in books])
-    out["ml_away"], out["ml_home"] = ml_a, ml_h
-    out["ml_away_book"] = next((b["book"] for b in books if b["ml_away"] == ml_a), None)
-    out["ml_home_book"] = next((b["book"] for b in books if b["ml_home"] == ml_h), None)
+    _side(out, "ml_away", books, "ml_away")
+    _side(out, "ml_home", books, "ml_home")
 
     # ---- run line: use the modal line, price only books posting it
     lines = [b["rl_line"] for b in books if b["rl_line"] is not None]
     rl = max(set(lines), key=lines.count) if lines else -1.5
     at = [b for b in books if b["rl_line"] == rl] or books
     out["rl_line"] = rl
-    out["rl_home"], _ = _best_price([b["rl_home"] for b in at])
-    out["rl_away"], _ = _best_price([b["rl_away"] for b in at])
+    _side(out, "rl_home", at, "rl_home")
+    _side(out, "rl_away", at, "rl_away")
     ch = [_devig_pair(b["rl_home"], b["rl_away"])[0] for b in at]
     ca = [_devig_pair(b["rl_home"], b["rl_away"])[1] for b in at]
     out["cons_rl_home"], out["cons_rl_away"] = _median(ch), _median(ca)
@@ -271,12 +330,12 @@ def _consensus(books: list[dict], home_abbr, away_abbr) -> dict:
         t = max(set(tots), key=tots.count)
         at = [b for b in books if b["total"] == t]
         out["total"] = t
-        out["over"], _ = _best_price([b["over"] for b in at])
-        out["under"], _ = _best_price([b["under"] for b in at])
+        _side(out, "over", at, "over")
+        _side(out, "under", at, "under")
         co = [_devig_pair(b["over"], b["under"])[0] for b in at]
         cu = [_devig_pair(b["over"], b["under"])[1] for b in at]
         out["cons_over"], out["cons_under"] = _median(co), _median(cu)
-        out["total_book"] = next((b["book"] for b in at if b["over"] == out["over"]), None)
+        out["total_book"] = out.get("over_book")
         # how much books disagree - a wide spread of totals means a soft market
         out["total_spread"] = round(max(tots) - min(tots), 1)
     return out
@@ -299,7 +358,7 @@ def _core_books(event_id, competition_id, home_abbr, away_abbr) -> list[dict]:
     if not event_id or not competition_id:
         return []
     js = get_json(CORE.format(event=event_id, competition=competition_id),
-                  cache_hours=0.25, quiet=True)
+                  cache_hours=0.05, quiet=True)
     if not js:
         return []
     return _books_from({"odds": js.get("items") or []}, home_abbr, away_abbr)
@@ -420,12 +479,17 @@ def odds_for_date(date_str: str) -> dict:
             if not has_priced_market(rec) or suspicious_record(rec):
                 continue
             rec.setdefault("rl_line", -1.5)
-            rec["rl_home"] = rec.get("rl_home") if rec.get("rl_home") is not None else -110.0
-            rec["rl_away"] = rec.get("rl_away") if rec.get("rl_away") is not None else -110.0
-            rec["over"] = rec.get("over") if rec.get("over") is not None else -110.0
-            rec["under"] = rec.get("under") if rec.get("under") is not None else -110.0
+            # There used to be four lines here that filled a missing run-line or
+            # total price in with -110. That was the worst bug in this project.
+            # A market nobody has priced is not a market priced at -110: the
+            # invented number got de-vigged into a fake 50/50 opinion, the model
+            # measured its edge against that, and a real -217 line could show up
+            # as a huge edge that never existed. A missing price is now missing.
+            # The model still publishes its own fair line for the market; it is
+            # labelled a fair line and it is not bettable.
             rec["book"] = (f"{rec['n_books']} books"
                            if rec["n_books"] > 1 else rec["books"][0])
+            rec["preferred_book"] = getattr(C, "PREFERRED_BOOK", None)
             rec["fetched_at"] = fetched
             rec["espn_id"] = ev.get("id")
             out[(teams["away"], teams["home"])] = rec

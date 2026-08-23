@@ -417,3 +417,17 @@ select.pick{width:100%;background:var(--panel2);border:1px solid var(--line);
   .row label{flex:1 0 100%;margin-bottom:2px}
   input[type=range]{flex:1 1 auto}
 }
+
+/* ---- price provenance --------------------------------------------------- */
+/* A better number somewhere else on the board. Green because it is money you
+   are leaving behind, not a warning. */
+.sup.better{color:var(--good)}
+
+/* The full per-book board, folded away under each game. */
+details.board{margin-top:10px}
+details.board>summary{cursor:pointer;font-size:13px;color:var(--dim);padding:7px 0;list-style:none}
+details.board>summary::-webkit-details-marker{display:none}
+details.board>summary::before{content:"\25B8  "}
+details.board[open]>summary::before{content:"\25BE  "}
+details.board>summary:hover{color:var(--ink)}
+details.board tr.mine td{color:var(--good);font-weight:650}
