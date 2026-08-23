@@ -483,6 +483,8 @@ function whatToBet() {
     ${addBtn(g, b)}</div>`;
 
   const v = el("div", "card today");
+  const oh = (S.slate || {}).odds_health || {};
+  const noVerifiedPrices = oh.status === "unavailable" || oh.priced_games === 0;
   v.innerHTML = `<div class="hd"><div class="match">What to bet${
       S.date === ((S.index || {}).latest) ? " today" : ` — ${esc(S.date || "")}`}</div>
     <div class="meta">
@@ -491,9 +493,12 @@ function whatToBet() {
       <span class="chip">${games.length} games</span></div></div>
   <div class="body">
     ${plays.length ? plays.map(p => line(p, true)).join("")
-      : `<div class="note"><b>Nothing to bet.</b> That is a result, not a failure — the
-         market is priced where the model is. ${
-           leans.length ? "The closest calls are below." : ""}</div>`}
+      : noVerifiedPrices
+        ? `<div class="note"><b>No verified sportsbook prices.</b> Edge and staking are
+           disabled. The game cards still show the model's fair lines.</div>`
+        : `<div class="note"><b>Nothing to bet.</b> That is a result, not a failure — the
+           market is priced where the model is. ${
+             leans.length ? "The closest calls are below." : ""}</div>`}
     ${leans.length ? `<details${plays.length ? "" : " open"}><summary>
        ${leans.length} number(s) the model likes but will not stake</summary>
        ${leans.slice(0, 8).map(p => line(p, false)).join("")}</details>` : ""}
@@ -523,6 +528,15 @@ function viewSlate() {
   const pf = (S.slate || {}).portfolio || {};
   const fresh = freshnessBanner();
   if (fresh) v.append(fresh);
+  const oh = (S.slate || {}).odds_health || {};
+  if ((S.slate || {}).days_out === 0 && oh.status === "unavailable")
+    v.append(el("div", "flag",
+      "Odds feed unavailable: no complete two-sided sportsbook market passed validation. " +
+      "Edges and stakes are disabled; only fair model lines are being shown."));
+  else if ((S.slate || {}).days_out === 0 && oh.status === "partial")
+    v.append(el("div", "flag",
+      `Partial odds feed: ${oh.priced_games || 0} of ${oh.expected_games || games.length} games ` +
+      "have verified two-sided prices. Unpriced markets cannot generate an edge or stake."));
   if (pf.divergence_flag)
     v.append(el("div", "flag",
       `Slate-wide divergence: on a typical game the model is ${pct(pf.median_gap, 1)} away from ` +
@@ -1254,8 +1268,10 @@ function viewModel() {
   <div class="note">
    <p><b>1. Inputs.</b> Schedule, probable starters, confirmed batting orders, season rate stats
    for every hitter and pitcher, and standings come from the MLB Stats API. Prices come from
-   ESPN's public scoreboard. Weather comes from Open-Meteo at the park's coordinates for the
-   hour of first pitch. Park factors and field orientation are a table in the repo you can edit.</p>
+   ESPN's public scoreboard, with its keyless Core odds endpoint as a fallback. Missing or
+   one-sided prices are rejected rather than estimated. Weather comes from Open-Meteo at the
+   park's coordinates for the hour of first pitch. Park factors and field orientation are a
+   table in the repo you can edit.</p>
 
    <p><b>2. Matchup.</b> Each hitter's and pitcher's plate-appearance outcome rates are regressed
    toward league average, then combined with a multinomial odds-ratio matchup, adjusted for
@@ -1276,7 +1292,8 @@ function viewModel() {
 
    <p><b>4b. Two edges, not one.</b> The number in the Edge column is the model's
    disagreement with the market: expected value priced at the no-vig consensus of
-   every book in the feed. Underneath it, where they differ, is what the bet is
+   every available book in the feed (currently often one DraftKings market). Underneath it,
+   where multiple books differ, is what the bet is
    actually worth at the best price on offer. Keeping them apart matters — the
    gap between consensus and best price is positive on <em>both</em> sides of a
    game whenever books disagree, so counting it as model edge would make every

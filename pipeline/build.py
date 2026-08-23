@@ -415,7 +415,7 @@ READINESS = {
 def readiness_of(g, odds, both_sp, lineups_confirmed) -> str:
     if g["abstract"] in ("Live", "Final"):
         return "LIVE"
-    priced = bool(odds.get("ml_away") or odds.get("total"))
+    priced = espn.has_priced_market(odds)
     if not both_sp:
         return "PENCIL"
     if not priced:
@@ -427,6 +427,9 @@ def verdict_of(bets, readiness, days_out) -> dict:
     """One line telling you what to do with this game, in plain words."""
     live = [b for b in bets if b["stake"] > 0]
     best = bets[0] if bets else None
+    if readiness == "LIVE":
+        return {"action": "PASS",
+                "text": "Game already started — pregame prices are shown for reference only."}
     if readiness == "PENCIL":
         return {"action": "WAIT", "text": "No starter announced yet — nothing to price."}
     if readiness == "EARLY":
@@ -455,7 +458,8 @@ def verdict_of(bets, readiness, days_out) -> dict:
 
 
 def build_date(date_str: str, lg: League, sd: dict, manual: dict,
-               calib: dict | None = None, days_out: int = 0) -> dict:
+               calib: dict | None = None, days_out: int = 0,
+               prior_odds: dict | None = None) -> dict:
     print(f"[{date_str}] fetching schedule…")
     games = schedule(date_str)
     if not games:
@@ -473,6 +477,19 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
         odds_map = espn.odds_for_date(date_str)
     else:
         print("  beyond the odds window — publishing fair lines only")
+
+    # A transient ESPN outage should not erase the last real number already
+    # published. Carry it forward with its original timestamp so the staleness
+    # controls still work. Never carry the old fabricated-all--110 shape.
+    for key, old in (prior_odds or {}).items():
+        if key in odds_map or not espn.has_priced_market(old) or espn.suspicious_record(old):
+            continue
+        cached = dict(old)
+        cached["carried_forward"] = True
+        cached["source"] = f"{old.get('source') or 'ESPN'} (cached)"
+        odds_map[key] = cached
+
+    odds_health = espn.feed_health(odds_map, len(games))
 
     calib = calib or {}
     total_adj = float(calib.get("total_adj") or 0.0)
@@ -568,14 +585,24 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
         bets = price_game(g, d, o, man)
         # Nothing gets staked days ahead of a price that will move, or on a game
         # whose picture is still incomplete. The read is still published.
-        if days_out > C.STAKE_MAX_DAYS_OUT or ready in ("EARLY", "PENCIL"):
+        stale_cached = (o.get("carried_forward")
+                        and (g["odds_age_h"] is None
+                             or g["odds_age_h"] > C.LOCK_MAX_ODDS_AGE_H))
+        if (days_out > C.STAKE_MAX_DAYS_OUT or ready in ("EARLY", "PENCIL", "LIVE")
+                or stale_cached):
             for b in bets:
                 if b["stake"] > 0:
                     b["stake"] = 0.0
                     b["to_win"] = 0.0
-                    b["suppressed"] = ("too far out to size"
-                                       if days_out > C.STAKE_MAX_DAYS_OUT
-                                       else "waiting on prices and starters")
+                if ready == "LIVE":
+                    b["tier"] = "PASS"
+                    b["suppressed"] = "game already started"
+                elif stale_cached:
+                    b["suppressed"] = "cached odds are stale"
+                elif days_out > C.STAKE_MAX_DAYS_OUT:
+                    b["suppressed"] = "too far out to size"
+                else:
+                    b["suppressed"] = "waiting on prices and starters"
 
         p_away_f = next((b["p_final"] for b in bets
                          if b["market"] == "ML" and b["selection"] == g["away"]), d["p_away"])
@@ -667,6 +694,7 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
 
     payload = {"date": date_str, "generated_at": _now(), "games": out_games,
                "n_games": len(out_games), "days_out": days_out,
+               "odds_health": odds_health,
                "calibration": {"total_adj": total_adj, "prob_scale": prob_scale,
                                "applied": bool(calib.get("applied"))}}
     notes = portfolio.apply(payload)
@@ -778,7 +806,11 @@ def main(argv=None):
             if ids:
                 print(f"reading bullpen usage over {len(hist)} day(s)…")
                 lg.load_usage(ids, hist)
-        payload = build_date(ds, lg, sd, manual, calib, days_out=i)
+        old = load_json(os.path.join(args.out, f"slate-{ds}.json"), {})
+        prior_odds = {(g.get("away"), g.get("home")): g.get("odds") or {}
+                      for g in old.get("games", []) if g.get("away") and g.get("home")}
+        payload = build_date(ds, lg, sd, manual, calib, days_out=i,
+                             prior_odds=prior_odds)
         save_json(os.path.join(args.out, f"slate-{ds}.json"), payload)
         built.append(payload)
 

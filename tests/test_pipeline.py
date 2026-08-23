@@ -121,6 +121,76 @@ def test_market_math():
     check("negative edge never stakes", M.kelly_stake(-0.02, -110, 250)[0] == 0.0)
 
 
+def test_espn_odds_schemas():
+    print("\n[ESPN odds schemas]")
+    from pipeline.sources.espn import (_books_from, _consensus, feed_health,
+                                       has_priced_market, suspicious_record)
+
+    # Shape returned by ESPN's public scoreboard in August 2026.
+    current = {
+        "provider": {"name": "DraftKings"},
+        "details": "HOU -174", "spread": -1.5, "overUnder": 9.0,
+        "awayTeamOdds": {}, "homeTeamOdds": {},
+        "moneyline": {
+            "away": {"close": {"odds": "+162"}},
+            "home": {"close": {"odds": "-174"}}},
+        "pointSpread": {
+            "away": {"close": {"line": "+1.5", "odds": "-136"}},
+            "home": {"close": {"line": "-1.5", "odds": "+112"}}},
+        "total": {
+            "over": {"close": {"line": "o9", "odds": "-102"}},
+            "under": {"close": {"line": "u9", "odds": "-118"}}},
+    }
+    books = _books_from({"odds": [current]}, "HOU", "ATH")
+    rec = _consensus(books, "HOU", "ATH")
+    check("current schema moneylines parsed",
+          rec.get("ml_away") == 162 and rec.get("ml_home") == -174, str(rec))
+    check("current schema explicit run lines and prices parsed",
+          rec.get("rl_line") == -1.5 and rec.get("rl_away") == -136
+          and rec.get("rl_home") == 112, str(rec))
+    check("current schema total prices parsed",
+          rec.get("total") == 9 and rec.get("over") == -102
+          and rec.get("under") == -118, str(rec))
+    check("current schema de-vigs every market",
+          all(rec.get(k) is not None for k in
+              ("cons_away", "cons_home", "cons_rl_away", "cons_rl_home",
+               "cons_over", "cons_under")))
+
+    # Shape retained by ESPN's keyless Core endpoint after first pitch.
+    core = {
+        "provider": {"name": "DraftKings"}, "overUnder": 9.0,
+        "overOdds": -102, "underOdds": -118,
+        "awayTeamOdds": {"moneyLine": 162, "current": {
+            "pointSpread": {"american": "+1.5"},
+            "spread": {"american": "-136"}}},
+        "homeTeamOdds": {"moneyLine": -174, "current": {
+            "pointSpread": {"american": "-1.5"},
+            "spread": {"american": "+112"}}},
+    }
+    core_rec = _consensus(_books_from({"odds": [core]}, "HOU", "ATH"), "HOU", "ATH")
+    check("Core fallback schema parsed",
+          core_rec.get("ml_away") == 162 and core_rec.get("rl_home") == 112
+          and core_rec.get("under") == -118, str(core_rec))
+
+    off = json.loads(json.dumps(current))
+    off["pointSpread"]["home"]["close"]["odds"] = "OFF"
+    off_rec = _consensus(_books_from({"odds": [off]}, "HOU", "ATH"), "HOU", "ATH")
+    check("one-sided OFF run line is not priced",
+          off_rec.get("rl_home") is None and off_rec.get("rl_away") is None, str(off_rec))
+
+    line_only = {"provider": {"name": "DraftKings"}, "spread": -1.5,
+                 "overUnder": 9.0, "awayTeamOdds": {}, "homeTeamOdds": {}}
+    check("lines without prices fail closed",
+          _books_from({"odds": [line_only]}, "HOU", "ATH") == [])
+    fake_old = {"rl_away": -110, "rl_home": -110, "rl_line": -1.5,
+                "total": 9.0, "over": -110, "under": -110}
+    check("fabricated all--110 record is rejected", suspicious_record(fake_old))
+    check("real current record is accepted", has_priced_market(rec) and not suspicious_record(rec))
+    health = feed_health({("ATH", "HOU"): rec}, expected_games=1)
+    check("odds health contract reports complete feed",
+          health["status"] == "ok" and health["moneyline_games"] == 1, str(health))
+
+
 def test_weather_model():
     print("\n[weather]")
     from pipeline.sources import weather as W
@@ -445,6 +515,7 @@ def test_full_build():
 if __name__ == "__main__":
     test_simulator_physics()
     test_market_math()
+    test_espn_odds_schemas()
     test_weather_model()
     test_full_build()
     print("\n" + ("=" * 60))

@@ -307,6 +307,8 @@ seeing it, updated.
 | Red ✗ on the workflow run | the build failed | Click the run → click the red step → read the last few red lines. Most often a data source was briefly down; just run it again. |
 | "No feed for this date yet" | no build has finished for that date | Actions → Run workflow, wait for the green tick, refresh. |
 | Page loads but every game says **no price** | ESPN had no odds posted yet | Normal early in the morning. Odds appear through the day; the next build picks them up. |
+| Red **odds feed unavailable/partial** banner | ESPN did not return a complete two-sided market for every game | The model fails closed: those markets cannot create an edge or stake. Re-run the workflow later and check the raw provider before betting. |
+| Every price appears identical | upstream response likely changed or failed validation | The build now rejects an all-identical slate instead of substituting -110. Check the newest workflow log. |
 | **404** at your github.io address | Pages is not switched on, or the first build has not finished | Settings → Pages → Source = **GitHub Actions**, then run the workflow. |
 | Wix shows an empty white box | the address is wrong or missing `https://` | Re-copy it from Settings → Pages. It must start with `https://`. |
 | The dashboard is there but tiny/cut off | the Wix embed box is too short | In the Wix editor drag the box taller. It does not resize itself. |

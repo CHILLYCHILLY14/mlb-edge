@@ -1,6 +1,18 @@
 name: Build MLB slate
 
 on:
+  push:
+    branches: [main]
+    # Deploy source fixes immediately. The bot's generated data-only commits
+    # do not match these paths, so they cannot create a workflow loop.
+    paths:
+      - ".github/workflows/build.yml"
+      - "pipeline/**"
+      - "tests/**"
+      - "docs/*.js"
+      - "docs/*.html"
+      - "docs/*.css"
+      - "requirements.txt"
   schedule:
     # UTC. Covers the whole MLB day: morning card, midday line moves, the
     # window when lineups post, first pitch, late west-coast games, and an
