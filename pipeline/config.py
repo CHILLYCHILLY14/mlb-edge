@@ -4,10 +4,46 @@ MLB Edge - central configuration.
 Everything tunable lives here. Nothing else in the pipeline hard-codes a knob.
 """
 from __future__ import annotations
-import os
+import math, os, sys
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a positive number without letting a repository variable kill CI.
+
+    GitHub repository variables are entered as text, so bankrolls commonly
+    arrive as ``$250`` or ``1,000``. Accept those friendly forms. Anything
+    unusable falls back to the documented default and leaves a visible warning
+    in the Actions log instead of raising during module import.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip().replace("$", "").replace(",", ""))
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        print(f"  ! invalid {name}={raw!r}; using {default}", file=sys.stderr)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive whole number, falling back on invalid text."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip().replace(",", ""))
+        if value <= 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        print(f"  ! invalid {name}={raw!r}; using {default}", file=sys.stderr)
+        return default
 
 # ---------------------------------------------------------------- bankroll ---
-BANKROLL          = float(os.environ.get("MLB_BANKROLL", 250.0))
+BANKROLL          = _env_float("MLB_BANKROLL", 250.0)
 KELLY_FRACTION    = 0.25    # fractional Kelly multiplier
 MAX_STAKE_PCT     = 0.05    # hard cap: 5% of bankroll on any single bet
 MIN_STAKE         = 1.00    # do not record a bet smaller than this
@@ -81,7 +117,7 @@ ROOF_CLOSE_HOT_F  = 95.0    # ...and above this
 ROOF_CLOSE_PRECIP = 0.50    # ...and when rain is likely
 
 # -------------------------------------------------------------------- misc ---
-SEASON            = int(os.environ.get("MLB_SEASON", 2026))
+SEASON            = _env_int("MLB_SEASON", 2026)
 TZ_DISPLAY        = "America/New_York"
 DATA_DIR          = os.environ.get("MLB_DATA_DIR", "data")
 DOCS_DATA_DIR     = os.environ.get("MLB_DOCS_DATA_DIR", "docs/data")
