@@ -104,3 +104,51 @@ MAX_PLAYS_PER_SLATE     = 6     # total staked positions in one day
 MAX_SLATE_EXPOSURE_PCT  = 0.15  # total money at risk across the whole slate
 ONE_SIDE_BET_PER_GAME   = True  # never stake both the ML and the run line
 DIVERGENCE_FLAG_RATIO   = 0.40  # if >40% of the slate screams edge, distrust it
+
+# --------------------------------------------------------------- lookahead ---
+# The schedule is published for the whole season, probable starters land a few
+# days out, and prices a day or two out. The model builds the whole window and
+# labels how finished each game's picture is rather than pretending a game with
+# no starter named is the same as one an hour from first pitch.
+LOOKAHEAD_DAYS    = 7
+STAKE_MAX_DAYS_OUT = 1      # only size real stakes on today and tomorrow
+ODDS_LOOKAHEAD_DAYS = 3     # beyond this ESPN rarely has prices
+
+# ---------------------------------------------------------- recent form -----
+RECENT_WINDOW_DAYS = 30     # rolling window blended on top of season stats
+RECENT_WEIGHT_BAT  = 0.30   # how much of a hitter's rate comes from the window
+RECENT_WEIGHT_PIT  = 0.25
+RECENT_MIN_PA      = 40     # ignore a window this thin
+RECENT_MIN_TBF     = 60
+
+# ------------------------------------------------------- platoon splits -----
+USE_REAL_SPLITS    = True
+SPLIT_PRIOR_PA     = 180    # regress a hitter's split toward his overall line
+
+# ------------------------------------------------- pitcher home run regression
+# Home run per fly ball is the noisiest thing a pitcher "owns". Regressing it
+# hard toward league average is the whole idea behind xFIP, and it stops a
+# lucky-so-far starter being priced as an ace.
+HR_REGRESS_PITCHER = 0.55   # 0 = trust the pitcher, 1 = use league average
+
+# --------------------------------------------------------- team defense -----
+USE_TEAM_DEFENSE   = True
+DEFENSE_STRENGTH   = 0.60   # how much of the measured DER gap to apply
+
+# ---------------------------------------------------- bullpen availability ---
+PEN_LOOKBACK_DAYS  = 3
+PEN_OUT_PITCHES_1D = 35     # threw this many yesterday -> unavailable today
+PEN_OUT_PITCHES_2D = 55     # ...over the last two days
+PEN_OUT_APPS_3D    = 3      # pitched three days running -> unavailable
+PEN_TIRED_PENALTY  = 0.12   # a merely tired arm is this much worse
+SP_SHORT_REST_DAYS = 4      # fewer days than this since his last start
+SP_SHORT_REST_PEN  = 0.05   # ...costs him this much
+
+# ------------------------------------------------------------- calibration ---
+# Learn from the model's own graded predictions, inside hard bounds, and only
+# once there is enough history for the correction to mean anything.
+CALIBRATION_ENABLED  = True
+CALIBRATION_MIN_GAMES = 150
+CALIB_TOTAL_MAX      = 0.50   # cap on the learned runs-per-game correction
+CALIB_PROB_MIN       = 0.80   # cap on the learned confidence scaling
+CALIB_PROB_MAX       = 1.20

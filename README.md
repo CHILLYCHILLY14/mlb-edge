@@ -38,6 +38,13 @@ adjustment. That is a regression on aggregates. This one plays the game.
 | Grading | manual ledger | automatic, every call including PASS, plus closing line value |
 | Your own bets | typed into a sheet | tap **+ Ledger** on any LEAN or better; it settles itself |
 | Edge readout | a number | a number on a fixed scale with the tier boundaries marked |
+| Every game | not tracked | predicted and scored whether or not you bet it |
+| Learning | none | bounded corrections learned from its own graded history |
+| Horizon | today | a week ahead, labeled by how complete each game's picture is |
+| Books | one number | every provider ESPN returns: consensus to grade against, best price to bet |
+| Bullpen | season ERA | who is actually available after the last three days of work |
+| Form | season only | season plus a rolling 30-day window |
+| Platoon | generic constant | each hitter's real numbers against that hand |
 
 The audit sheet in the workbook said it plainly: a 55% win rate with a −24% ROI
 over the last twenty bets. That is not a handicapping problem, it is a staking
@@ -174,11 +181,77 @@ value is tracked on every call.
 
 ---
 
+## What is new in this version
+
+**A week of games, not one.** The schedule is published for the whole season, so
+the model builds seven days out and labels each game by how much of the picture
+has actually arrived:
+
+| State | Means |
+|---|---|
+| `ready` | priced, both starters posted, lineups confirmed |
+| `priced` | priced, both starters posted, lineups still projected |
+| `no prices yet` | starters posted, no book has hung a number |
+| `starter TBA` | nobody has announced |
+| `live` | in progress or final |
+
+Fair lines are published at every stage. Real stakes are only sized for today and
+tomorrow — anything further out is a read, not a bet, because the number will
+move.
+
+**Every game is scored, bet or not.** `pipeline/predict.py` records the model's
+winner, win probability, projected score and projected total for every game on
+the schedule, then grades all of them. That gives a straight-up record, a Brier
+score, reliability by confidence bucket, run and total error, and a head-to-head
+against the market's own opinion on the same games. The bet ledger tells you
+whether the model found soft numbers; this tells you whether it reads baseball.
+
+**It learns from that.** Once 150 games are graded, two bounded corrections come
+back into the build: a runs-per-game offset if projections have been running high
+or low, and a confidence scaling if the model has been too sure or too timid.
+Both are capped, both are shown on the Accuracy tab, and both can be switched off
+in `config.py`.
+
+**Better inputs.**
+
+- **Bullpen availability.** Recent boxscores are read to find who threw what. An
+  arm over 35 pitches yesterday, 55 across two days, or out three days running is
+  dropped from the bullpen composite entirely; a merely worked arm is
+  downweighted and made slightly worse. A bullpen's season ERA tells you nothing
+  about whether its best three arms can pitch tonight.
+- **Starter rest.** Days since his last start, with a penalty on short rest.
+- **Recent form.** A rolling 30-day window mixed into season rates, so a hitter
+  who stopped hitting in June is not still priced on April.
+- **Real platoon splits.** Each hitter's actual line against left- and
+  right-handed pitching, regressed toward his own overall numbers, instead of one
+  league-average constant.
+- **Home run regression.** A pitcher's home run rate is pulled 55% toward league
+  average — the idea behind xFIP — so a lucky-so-far starter is not priced as an
+  ace.
+- **Team defense.** Defensive efficiency, the share of balls in play a club turns
+  into outs, adjusts hits on contact.
+
+**Consensus pricing, still keyless.** ESPN's free scoreboard returns several
+sportsbooks in one call. The model de-vigs each, takes the median as the market's
+real opinion, and grades edges against that — while showing the best price on
+offer and which book has it. Grading against the best price instead would
+manufacture an edge on every game just by shopping.
+
+**More markets from the same simulation.** First five innings, no-run-first-inning,
+team totals and shutout odds all fall out of the same run distribution, so they
+cannot contradict the moneyline. ESPN carries none of them, so fair lines are
+published for shopping, and real prices pasted into `data/manual_odds.json` get
+priced and graded like any other market.
+
+---
+
 ## The seven screens
 
-**Slate** — every game as a card: both starters with their season lines, the
-projection, the run distribution, every priced market, and a paragraph saying
-why the number is what it is.
+**Slate** — opens with **What to bet**: the actual card with stakes, and beneath
+it the numbers the model likes but will not stake, and why. Then the week strip,
+then every game as a card with a one-line verdict — BET, LEAN, WATCH, WAIT or
+PASS — both starters, bullpen availability, the run distribution, every priced
+market, and a paragraph explaining the number.
 
 **Best Bets** — today's card only. What to bet, at what price, for how much.
 
@@ -192,10 +265,11 @@ pinned while the rest scrolls, so a phone still works.
 **Power Ratings** — every roster simulated against one identically-built
 reference opponent, both home and away, in a neutral park.
 
-**Accuracy** — two panels kept deliberately apart. Yours: how the tiers have
-performed *for you*, on the bets you clicked, at the stakes you took. The
-model's: every call it made, PASSes included, by tier and by market, with
-calibration and the full shadow book underneath.
+**Accuracy** — three records, kept deliberately apart. **Game predictions**:
+every game scored, bet or not, with calibration, run and total error, and the
+head-to-head against the market. **Bet calls**: every call the model made,
+PASSes included, by tier and by market. **Your bets**: how the tiers performed
+for you, at the stakes you actually took.
 
 **Model** — how the number is made, in plain English.
 
@@ -247,6 +321,7 @@ pipeline/
   config.py            every tunable knob
   build.py             orchestrator
   grade.py             shadow book: record, settle, summarise
+  predict.py           game predictions, scoring, and the learned corrections
   sources/
     http.py            cached JSON fetcher with retries and fixture replay
     mlb_api.py         schedule, rosters, stats, standings, final scores

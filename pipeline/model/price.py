@@ -52,18 +52,32 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
     away, home = g["away"], g["home"]
     bets = []
 
+    # The price we would bet and the price we measure against are different
+    # numbers. Best-available is what you get filled at; the consensus of every
+    # book ESPN returns is the market's actual opinion. Grading an edge against
+    # the best price would invent an edge on every game just by shopping.
+    def market(cons_key, a, b):
+        c = odds.get(cons_key)
+        if c is not None:
+            return c
+        return no_vig(a, b)[0]
+
     # ---------------------------------------------------------- moneyline ---
     ml_a, ml_h = odds.get("ml_away"), odds.get("ml_home")
-    mk_a, mk_h = no_vig(ml_a, ml_h)
+    mk_a = market("cons_away", ml_a, ml_h)
+    mk_h = market("cons_home", ml_h, ml_a)
     bets.append(_bet("ML", away, f"{away} ML", ml_a, d["p_away"], mk_a,
-                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, book=odds.get("book")))
+                     C.MARKET_BLEND, C.EDGE_CEILING, ctx,
+                     book=odds.get("ml_away_book") or odds.get("book")))
     bets.append(_bet("ML", home, f"{home} ML", ml_h, d["p_home"], mk_h,
-                     C.MARKET_BLEND, C.EDGE_CEILING, ctx, book=odds.get("book")))
+                     C.MARKET_BLEND, C.EDGE_CEILING, ctx,
+                     book=odds.get("ml_home_book") or odds.get("book")))
 
     # ----------------------------------------------------------- run line ---
     rl = odds.get("rl_line", -1.5)
     rl_h, rl_a = odds.get("rl_home"), odds.get("rl_away")
-    mk_rh, mk_ra = no_vig(rl_h, rl_a)
+    mk_rh = market("cons_rl_home", rl_h, rl_a)
+    mk_ra = market("cons_rl_away", rl_a, rl_h)
     bets.append(_bet("RL", home, f"{home} {rl:+.1f}", rl_h, d["p_home_rl"], mk_rh,
                      C.MARKET_BLEND, C.EDGE_CEILING, ctx, book=odds.get("book"), line=rl))
     bets.append(_bet("RL", away, f"{away} {-rl:+.1f}", rl_a, d["p_away_rl"], mk_ra,
@@ -73,13 +87,16 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
     tot = odds.get("total")
     if tot is not None and "p_total_over" in d:
         gap = abs(d["mean_total"] - tot)
-        mk_o, mk_u = no_vig(odds.get("over"), odds.get("under"))
+        mk_o = market("cons_over", odds.get("over"), odds.get("under"))
+        mk_u = market("cons_under", odds.get("under"), odds.get("over"))
         bets.append(_bet("TOTAL", "Over", f"Over {tot}", odds.get("over"),
                          d["p_total_over"], mk_o, C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
-                         ctx, is_total=True, total_gap=gap, book=odds.get("book"), line=tot))
+                         ctx, is_total=True, total_gap=gap,
+                         book=odds.get("total_book") or odds.get("book"), line=tot))
         bets.append(_bet("TOTAL", "Under", f"Under {tot}", odds.get("under"),
                          d["p_total_under"], mk_u, C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
-                         ctx, is_total=True, total_gap=gap, book=odds.get("book"), line=tot))
+                         ctx, is_total=True, total_gap=gap,
+                         book=odds.get("total_book") or odds.get("book"), line=tot))
 
     # ---------------------------------------------------------- first five ---
     # ESPN does not publish F5 prices. If you paste them into data/manual_odds.json
@@ -105,9 +122,69 @@ def price_game(g: dict, d: dict, odds: dict | None, manual: dict | None = None) 
                          d["p_f5_under"], mk_u, C.F5_BLEND, C.EDGE_CEILING_TOT, ctx,
                          is_total=True, total_gap=gap, book=f5.get("book", "manual"), line=f5t))
 
+    # ---- first inning and team totals -------------------------------------
+    # ESPN does not publish these. The model still simulates them and publishes
+    # a fair line for both, and prices them properly if you paste a number into
+    # data/manual_odds.json.
+    nr = manual.get("nrfi") or {}
+    if nr.get("yes") and nr.get("no"):
+        mk = no_vig(nr["yes"], nr["no"])
+        bets.append(_bet("NRFI", "Yes", "No run in the 1st", nr["yes"],
+                         d["p_nrfi"], mk[0], C.F5_BLEND, C.EDGE_CEILING_TOT, ctx,
+                         book=nr.get("book", "manual")))
+        bets.append(_bet("NRFI", "No", "Run in the 1st", nr["no"],
+                         d["p_yrfi"], mk[1], C.F5_BLEND, C.EDGE_CEILING_TOT, ctx,
+                         book=nr.get("book", "manual")))
+    for side, key in ((away, "team_total_away"), (home, "team_total_home")):
+        tt = (manual.get("team_totals") or {}).get(side) or {}
+        line = tt.get("line")
+        if line is None or not (tt.get("over") and tt.get("under")):
+            continue
+        from .simulate import team_total_ou
+        import numpy as _np
+        probs = d.get(f"{key}_at_line") or {}
+        po, pu = probs.get("over"), probs.get("under")
+        if po is None:
+            continue
+        mk = no_vig(tt["over"], tt["under"])
+        gap = abs(d[key]["mean"] - line)
+        bets.append(_bet("TEAM TOTAL", f"{side} Over", f"{side} Over {line}",
+                         tt["over"], po, mk[0], C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
+                         ctx, is_total=True, total_gap=gap,
+                         book=tt.get("book", "manual"), line=line))
+        bets.append(_bet("TEAM TOTAL", f"{side} Under", f"{side} Under {line}",
+                         tt["under"], pu, mk[1], C.TOTALS_BLEND, C.EDGE_CEILING_TOT,
+                         ctx, is_total=True, total_gap=gap,
+                         book=tt.get("book", "manual"), line=line))
+
     bets = [b for b in bets if b]
     bets.sort(key=lambda b: -b["edge"])
     return bets
+
+
+def derived_lines(d: dict, away: str, home: str) -> dict:
+    """
+    Fair numbers for the markets no free feed carries. Published so they can be
+    shopped by hand even with no price to compare against.
+    """
+    return {
+        "nrfi": {"yes": fmt_american(prob_to_american(d["p_nrfi"])),
+                 "no": fmt_american(prob_to_american(d["p_yrfi"])),
+                 "yes_pct": round(d["p_nrfi"] * 100, 1),
+                 "mean_runs": round(d["mean_i1"], 2)},
+        "team_totals": {
+            away: {"line": d["team_total_away"]["line"],
+                   "over": fmt_american(prob_to_american(d["team_total_away"]["over"])),
+                   "under": fmt_american(prob_to_american(d["team_total_away"]["under"])),
+                   "mean": round(d["team_total_away"]["mean"], 2)},
+            home: {"line": d["team_total_home"]["line"],
+                   "over": fmt_american(prob_to_american(d["team_total_home"]["over"])),
+                   "under": fmt_american(prob_to_american(d["team_total_home"]["under"])),
+                   "mean": round(d["team_total_home"]["mean"], 2)},
+        },
+        "shutout": {away: round(d["p_away_shutout"] * 100, 1),
+                    home: round(d["p_home_shutout"] * 100, 1)},
+    }
 
 
 def _f5_side(d: dict, side: str) -> float:

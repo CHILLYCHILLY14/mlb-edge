@@ -151,7 +151,7 @@ def test_full_build():
 
     from pipeline import build as B
     B.C.DATA_DIR = data
-    rc = B.main(["--date", "2026-08-21", "--days", "1", "--out", tmp, "--no-grade"])
+    rc = B.main(["--date", "2026-08-21", "--days", "3", "--out", tmp, "--no-grade"])
     check("build returns 0", rc == 0)
 
     slate = json.load(open(os.path.join(tmp, "slate-2026-08-21.json")))
@@ -221,6 +221,66 @@ def test_full_build():
     check("moneylines carry no line", all(b["line"] is None for g in games
           for b in g["bets"] if b["market"] in ("ML", "F5 ML")))
 
+    print("\n[lookahead]")
+    day2 = json.load(open(os.path.join(tmp, "slate-2026-08-22.json")))
+    day3 = json.load(open(os.path.join(tmp, "slate-2026-08-23.json")))
+    check("future dates are built", len(day2["games"]) and len(day3["games"]))
+    check("each slate knows how far out it is",
+          day2["days_out"] == 1 and day3["days_out"] == 2)
+    check("every game carries a readiness state",
+          all(g["readiness"] in B.READINESS for d in (slate, day2, day3) for g in d["games"]))
+    far = [b for g in day3["games"] for b in g["bets"] if b["stake"] > 0]
+    check("nothing is staked beyond the sizing window", not far, f"{len(far)} staked")
+    check("far-out games still publish a read",
+          all(g["verdict"]["action"] in ("BET", "LEAN", "WATCH", "PASS", "WAIT")
+              for g in day3["games"]))
+    check("every game carries a plain-language verdict",
+          all(len(g["verdict"]["text"]) > 20 for g in slate["games"]))
+
+    print("\n[new markets and inputs]")
+    g0 = games[0]
+    d0 = g0["sim"]
+    check("first-inning market sums to one",
+          abs(d0["p_nrfi"] + d0["p_yrfi"] - 1) < 1e-9)
+    check("first-inning runs are plausible", 0.4 <= d0["mean_i1"] <= 1.8, f"{d0['mean_i1']:.2f}")
+    check("team totals are published for both sides",
+          all(t in g["derived"]["team_totals"] for g in games for t in (g["away"], g["home"])))
+    check("team total lines avoid a push",
+          all(g["derived"]["team_totals"][g["away"]]["line"] % 1 == 0.5 for g in games))
+    check("shutout odds published", all("shutout" in g["derived"] for g in games))
+    check("NRFI fair price published",
+          all(g["derived"]["nrfi"]["yes"] for g in games))
+    check("team means add up to the game total",
+          all(abs(g["derived"]["team_totals"][g["away"]]["mean"]
+                  + g["derived"]["team_totals"][g["home"]]["mean"]
+                  - g["sim"]["mean_total"]) < 0.02 for g in games))
+
+    priced = [g for g in games if g["odds"].get("n_books")]
+    check("odds carry a multi-book consensus", len(priced) > 0, str(len(priced)))
+    if priced:
+        o = priced[0]["odds"]
+        check("consensus probabilities are de-vigged",
+              abs(o["cons_away"] + o["cons_home"] - 1) < 1e-6)
+        check("several books are read, not one", o["n_books"] >= 2, str(o["n_books"]))
+        check("the edge is measured against consensus, not the best price",
+              all(abs(b["p_market"] - o["cons_away" if b["selection"] == priced[0]["away"]
+                                        else "cons_home"]) < 2e-4
+                  for b in priced[0]["bets"] if b["market"] == "ML" and b["p_market"] is not None))
+        # Shopping strips vig: the two best prices together imply less than any
+        # single book does. That is exactly why the edge has to be graded
+        # against the consensus and not against the numbers you actually bet -
+        # otherwise every game shows an edge for free.
+        from pipeline.model.market import american_to_prob as _p
+        best_over = _p(o["ml_away"]) + _p(o["ml_home"])
+        check("shopping strips vig rather than creating an edge",
+              best_over <= 1.06, f"best-price overround {best_over:.4f}")
+        check("the consensus keeps a real market margin out of the comparison",
+              abs(o["cons_away"] + o["cons_home"] - 1.0) < 1e-6)
+    check("bullpen availability is reported",
+          all("unavailable" in g["away_pen"] and "tired" in g["away_pen"] for g in games))
+    check("defensive efficiency is measured",
+          all(0.55 <= g["defense"]["league"] <= 0.80 for g in games))
+
     ratings = json.load(open(os.path.join(tmp, "ratings.json")))["teams"]
     check("30 teams rated", len(ratings) == 30, str(len(ratings)))
     check("ratings sorted by true talent",
@@ -269,6 +329,43 @@ def test_full_build():
           all(k in sample for k in ("away_score", "home_score", "f5_away", "f5_home")))
     check("results cover every graded game",
           {str(r["gamePk"]) for r in perf["ledger"]} <= set(res))
+
+    print("\n[prediction ledger]")
+    import pipeline.predict as PR
+    PR.STORE = os.path.join(data, "predictions.json")
+    fake_api.FINAL_DATES.add("2026-08-22")
+    n = PR.grade()
+    check("game predictions are graded", n > 0, str(n))
+    ps = PR.summary()
+    ov = ps["overall"]
+    check("every game is scored, not just the bets",
+          ov["n"] >= 15, f"{ov['n']} graded")
+    check("straight-up accuracy reported", 0.0 <= ov["accuracy"] <= 1.0)
+    check("Brier score reported", ov["brier"] is not None)
+    check("model and market are scored on the same games",
+          ps["vs_market"]["n"] > 0 and ps["vs_market"]["market_brier"] is not None)
+    check("run and total error tracked",
+          ov["mae_total"] is not None and ov["mae_runs"] is not None)
+    check("predictions exist for games with no bet",
+          ov["n"] >= len({r["gamePk"] for r in perf["ledger"]}))
+    cal = PR.calibration()
+    check("calibration holds off until there is enough history",
+          (cal["n"] >= C.CALIBRATION_MIN_GAMES) == cal["applied"],
+          f"n={cal['n']} applied={cal['applied']}")
+    check("calibration corrections stay inside their bounds",
+          abs(cal["total_adj"]) <= C.CALIB_TOTAL_MAX
+          and C.CALIB_PROB_MIN <= cal["prob_scale"] <= C.CALIB_PROB_MAX)
+
+    print("\n[bad upstream data]")
+    from pipeline.model.rates import blend_windows, split_vector, LEAGUE_FALLBACK
+    lg = LEAGUE_FALLBACK
+    good = {"bb": 60, "k": 110, "s": 90, "d": 30, "t": 2, "hr": 34}
+    junk = {"bb": 300, "k": 300, "s": 300, "d": 300, "t": 300, "hr": 300}
+    v = blend_windows(good, 500, junk, 50, lg, 200, 0.3, 40)
+    check("an impossible rolling window is ignored",
+          abs(float(v[5]) - float(blend_windows(good, 500, None, 0, lg, 200, 0.3, 40)[5])) < 1e-9)
+    v2 = split_vector(good, 500, junk, 50, lg, 200, 180)
+    check("an impossible split is ignored", 0 <= float(v2[5]) <= 0.25, f"{float(v2[5]):.3f}")
 
     shutil.rmtree(tmp, ignore_errors=True)
 

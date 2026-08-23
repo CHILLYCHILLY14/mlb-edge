@@ -112,6 +112,28 @@ def _roster(tid, group):
     return {"roster": people}
 
 
+COUNT_KEYS = ("hits", "doubles", "triples", "homeRuns", "baseOnBalls",
+              "intentionalWalks", "hitByPitch", "strikeOuts", "atBats",
+              "sacFlies", "stolenBases", "rbi", "runs", "earnedRuns")
+
+
+def _rescale(st: dict, denom_key: str, target: int) -> dict:
+    """Shrink a generated stat line to a smaller sample, counts and all.
+
+    Rewriting the denominator without rewriting the counts produces a hitter
+    with a .900 batting average, which is exactly the kind of impossible input
+    the model should never see from a fixture pretending to be real.
+    """
+    old = float(st.get(denom_key) or 1.0)
+    f = max(target, 1) / max(old, 1.0)
+    out = dict(st)
+    for k in COUNT_KEYS:
+        if k in out:
+            out[k] = int(round(float(out[k]) * f))
+    out[denom_key] = int(target)
+    return out
+
+
 def _matchups(date_str):
     rng = random.Random(hash(date_str) & 0xFFFF)
     ids = TEAM_IDS[:]
@@ -192,24 +214,37 @@ def _espn(date_str):
             return round(-100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)
         ml_h, ml_a = price(p_home), price(1 - p_home)
         fav_home = p_home >= 0.5
+        # Several books, each a shade different, the way the real feed comes back.
+        base_total = rng.choice([7.0, 7.5, 8.0, 8.5, 9.0, 9.5])
+        odds_blocks = []
+        for name, jitter in (("DraftKings", 0), ("FanDuel", 6), ("ESPN BET", -5)):
+            odds_blocks.append({
+                "provider": {"name": name},
+                "details": f"{TEAM_ABBR[home if fav_home else away]} -1.5",
+                "spread": -1.5,
+                "overUnder": base_total + rng.choice([0, 0, 0.5]),
+                "overOdds": -110 + jitter, "underOdds": -110 - jitter,
+                "awayTeamOdds": {"moneyLine": ml_a + jitter,
+                                 "spreadOdds": rng.choice([-135, 145])},
+                "homeTeamOdds": {"moneyLine": ml_h - jitter,
+                                 "spreadOdds": rng.choice([-135, 145])}})
         events.append({"id": str(rng.randint(1, 10**6)), "competitions": [{
             "competitors": [
                 {"homeAway": "home", "team": {"abbreviation": TEAM_ABBR[home]}, "score": None},
                 {"homeAway": "away", "team": {"abbreviation": TEAM_ABBR[away]}, "score": None}],
-            "odds": [{"provider": {"name": "DraftKings"},
-                      "details": f"{TEAM_ABBR[home if fav_home else away]} -1.5",
-                      "spread": -1.5, "overUnder": rng.choice([7.0, 7.5, 8.0, 8.5, 9.0, 9.5]),
-                      "overOdds": -110, "underOdds": -110,
-                      "awayTeamOdds": {"moneyLine": ml_a, "spreadOdds": rng.choice([-135, 145])},
-                      "homeTeamOdds": {"moneyLine": ml_h, "spreadOdds": rng.choice([-135, 145])}}],
+            "odds": odds_blocks,
             "status": {"type": {"completed": False}}}]})
     return {"events": events}
 
 
 def _weather():
     rng = random.Random(99)
-    times = [(datetime.now(timezone.utc) + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00")
-             for h in range(-24, 96)]
+    # A fixed wide window around the dates the suite uses. Anchoring this to
+    # datetime.now() meant the fixture silently drifted out from under the tests
+    # overnight, which looked like a weather bug and was not one.
+    base = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    times = [(base + timedelta(hours=h)).strftime("%Y-%m-%dT%H:00")
+             for h in range(0, 24 * 30)]
     n = len(times)
     return {"hourly": {"time": times,
                        "temperature_2m": [rng.uniform(55, 95) for _ in range(n)],
@@ -238,8 +273,38 @@ def responder(url: str, **kw):
         if "/people?" in url:
             ids = re.search(r"personIds=([\d,]+)", url)
             group = "hitting" if "group=hitting" in url else "pitching"
+            id_list = ids.group(1).split(",") if ids else []
             people = []
-            for i in (ids.group(1).split(",") if ids else []):
+
+            if "type=statSplits" in url:
+                for i in id_list:
+                    rng = random.Random(int(i) * 7 + 5)
+                    splits = []
+                    for code, desc, q in (("vl", "vs Left", rng.gauss(0, .06)),
+                                          ("vr", "vs Right", rng.gauss(0, .06))):
+                        st = _hitting_line(rng, q)
+                        st = _rescale(st, "plateAppearances",
+                                      int(st["plateAppearances"] * rng.uniform(.25, .5)))
+                        splits.append({"split": {"code": code, "description": desc}, "stat": st})
+                    people.append({"id": int(i), "fullName": f"Player {i}",
+                                   "batSide": {"code": "R"},
+                                   "stats": [{"splits": splits}]})
+                return {"people": people}
+
+            if "type=byDateRange" in url:
+                for i in id_list:
+                    rng = random.Random(int(i) * 11 + 3)
+                    st = (_hitting_line(rng, rng.gauss(0, .09)) if group == "hitting"
+                          else _pitching_line(rng, rng.gauss(0, .09), False))
+                    key = "plateAppearances" if group == "hitting" else "battersFaced"
+                    st = _rescale(st, key, rng.randint(30, 120) if group == "hitting"
+                                  else rng.randint(20, 130))
+                    people.append({"id": int(i), "fullName": f"Player {i}",
+                                   "batSide": {"code": "R"}, "pitchHand": {"code": "R"},
+                                   "stats": [{"splits": [{"stat": st}]}]})
+                return {"people": people}
+
+            for i in id_list:
                 rng = random.Random(int(i))
                 st = _hitting_line(rng, 0) if group == "hitting" else _pitching_line(rng, 0, False)
                 people.append({"id": int(i), "fullName": f"Player {i}",
@@ -247,6 +312,26 @@ def responder(url: str, **kw):
                                "batSide": {"code": "R"}, "pitchHand": {"code": "R"},
                                "stats": [{"splits": [{"stat": st}]}]})
             return {"people": people}
+
+        m = re.search(r"/game/(\d+)/boxscore", url)
+        if m:
+            gp = int(m.group(1))
+            rng = random.Random(gp)
+            teams = {}
+            for side in ("away", "home"):
+                tid = TEAM_IDS[rng.randrange(30)]
+                order = [pid(tid, 0, "p")] + [pid(tid, 100 + k, "p")
+                                              for k in rng.sample(range(9), 4)]
+                players = {}
+                for n, q in enumerate(order):
+                    pitches = rng.randint(70, 100) if n == 0 else rng.randint(8, 42)
+                    outs = rng.randint(15, 21) if n == 0 else rng.randint(1, 6)
+                    players[f"ID{q}"] = {"stats": {"pitching": {
+                        "numberOfPitches": pitches,
+                        "inningsPitched": f"{outs//3}.{outs%3}",
+                        "battersFaced": rng.randint(3, 26)}}}
+                teams[side] = {"pitchers": order, "players": players}
+            return {"teams": teams}
         if "/stats?" in url:
             return {"stats": []}
     if "site.api.espn.com" in url:

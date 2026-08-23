@@ -164,6 +164,40 @@ it settles itself once the game finishes.
 erases it. In My Ledger tap **Export JSON** every so often and keep the file.
 **Import** puts it back.
 
+### Looking ahead
+
+Under the tabs there is a strip of dates running about a week out. Each one says
+what is actually ready on that day — how many games, how many are priced, how
+many plays there are.
+
+Games arrive in stages, and every card says which stage it is at:
+
+| Chip | Means |
+|---|---|
+| **ready** | priced, both starters posted, lineups confirmed — the full picture |
+| **priced** | priced, both starters posted, lineups not out yet |
+| **no prices yet** | starters known, no book has hung a number |
+| **starter TBA** | nobody has announced a pitcher |
+| **live** | in progress, or finished |
+
+The model publishes its own fair line at every stage, so you can shop a game
+before a price exists. But it only sizes real stakes for today and tomorrow.
+Anything further out is a read, not a bet, because the number will move before
+you can take it.
+
+### Every game gets scored, bet or not
+
+Separately from your ledger, the model records a prediction for **every game on
+the schedule** — who wins, how likely, and the projected score — and grades all
+of them when the games finish. That is the **Game predictions** panel on the
+Accuracy tab: how often it picks winners, how far off the scores are, whether it
+is better or worse than the market at calling games.
+
+Once 150 games are graded it starts correcting itself: if projections have been
+running a run high, it shifts them down; if it has been too confident, it dials
+confidence back. Both corrections are capped, and the panel says exactly what is
+being applied and where it came from.
+
 ---
 
 ## Part 4 — Changing a setting
@@ -200,6 +234,12 @@ The settings people actually change:
 | `MAX_PLAYS_PER_SLATE` | `6` | more bets per day | fewer |
 | `MAX_SLATE_EXPOSURE_PCT` | `0.15` | more money at risk daily | less |
 | `N_SIMS` | `20000` | more precision, slower builds | faster builds |
+| `LOOKAHEAD_DAYS` | `7` | see further ahead, slower builds | faster builds |
+| `STAKE_MAX_DAYS_OUT` | `1` | size stakes further ahead | today only |
+| `RECENT_WEIGHT_BAT` | `0.30` | weight the last 30 days more | trust the season |
+| `HR_REGRESS_PITCHER` | `0.55` | trust league average on home runs | trust the pitcher |
+| `CALIBRATION_ENABLED` | `True` | — | set `False` to stop it self-correcting |
+| `CALIBRATION_MIN_GAMES` | `150` | wait for more history first | start correcting sooner |
 
 > Careful with `KELLY_FRACTION` and `MAX_STAKE_PCT`. Those two are what the
 > audit in your old workbook said had done the damage — a 55% win rate with a
@@ -214,9 +254,11 @@ When you get a new `mlb-edge.zip`:
 1. **First, back up your ledger.** Open the dashboard → **My Ledger** →
    **Export JSON** → save the file.
 2. Unzip the new version.
-3. **Delete `data/shadow.json` from the new unzipped folder.** That file in your
-   repo holds every graded call the model has made; the copy in the zip is empty
-   and would wipe your history.
+3. **Delete `data/shadow.json` AND `data/predictions.json` from the new unzipped
+   folder.** Those two files in your repo hold every graded bet call and every
+   graded game prediction the model has made. The copies in the zip are empty and
+   would wipe your history — including the accuracy record the model corrects
+   itself from.
 4. In your repo: **Add file** → **Upload files**.
 5. Select everything inside the new unzipped folder and drag it in. Same-named
    files are replaced; your history is untouched.
@@ -244,6 +286,10 @@ seeing it, updated.
 | Same numbers all day | you are looking at a cached page | Pull down to refresh, or add `?x=1` to the address. |
 | Red **divergence flag** banner | the model disagrees with the market on an unusual share of the slate | Usually a data problem, not free money. The model already capped its own best bets. Treat that day's edges with suspicion. |
 | Lots of games say **lineups projected** | batting orders are not posted yet | Normal until a few hours before first pitch. Best bets need confirmed starters, so more appear as the day goes on. |
+| Later days say **no prices yet** | books have not hung numbers that far out | Expected — books post two or three days ahead. The model publishes its own fair line so you can shop it when the number lands. |
+| Future days show no stakes at all | stakes are only sized for today and tomorrow | Deliberate: a price four days out will move before you can take it. Change `STAKE_MAX_DAYS_OUT` in `config.py` if you disagree. |
+| **Learning from it: not applied yet** | fewer than 150 games graded so far | It fills up on its own — about a week and a half of full slates. |
+| A club shows a big **run bias** | the model consistently misreads that roster | Worth knowing before you back them. It usually shrinks as the sample grows. |
 
 **Reading a failed run:** Actions → click the run → click **build** → the step
 with the red ✗ opens to show the log. The useful line is usually the last one
@@ -269,6 +315,14 @@ that is not indented.
 | **Shadow book** | every call the model makes, graded, including the ones it told you to skip. That is how you know if the tiers are set right. |
 | **Park factor** | how much a stadium adds or subtracts. `112/111` means 12% more runs and 11% more home runs than average. |
 | **Power rating / True W%** | what the model thinks a roster would do against average opposition, ignoring luck and schedule. |
+| **Consensus** | the middle opinion across every sportsbook in the feed, with the margin removed. Edges are measured against this, not against the best price — otherwise shopping alone would look like an edge. |
+| **Best price** | the most generous number on offer for that bet, and the book offering it. This is the one you would actually take. |
+| **Readiness** | how complete a game's picture is: ready, priced, no prices yet, starter TBA, live. |
+| **NRFI** | "no run first inning" — neither team scores in the first. |
+| **Team total** | one club's runs, over or under a number, rather than the two combined. |
+| **Brier score** | how good the win probabilities are, not just the picks. Lower is better; 0.25 is a coin flip. The market's score sits next to the model's. |
+| **Calibration** | whether things called 60% actually happen 60% of the time. |
+| **Run bias** | how far the projected score sits from the real one on average. Positive means the model reads high. |
 
 ---
 

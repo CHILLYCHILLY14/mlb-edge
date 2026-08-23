@@ -308,3 +308,68 @@ details.gd[open] > summary.gsum{margin-bottom:6px}
   .glance-bet{flex:1 1 100%}
   details.gd > summary.gsum{padding:7px 0 3px}
 }
+
+/* ---------- week strip ---------- */
+.week{display:flex;gap:5px;overflow-x:auto;padding:2px 0 8px;
+  touch-action:pan-x pan-y;overscroll-behavior-x:contain}
+.week button{flex:0 0 auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:6px 10px;cursor:pointer;color:var(--dim);
+  font-family:var(--mono);font-size:11px;line-height:1.3;text-align:center;min-width:64px}
+.week button:hover{border-color:var(--accent)}
+.week button.on{border-color:var(--accent);color:var(--ink);background:var(--panel2)}
+.week button b{display:block;font-size:13px;color:var(--ink);font-weight:600}
+.week button i{font-style:normal;display:block;font-size:9.5px;color:var(--faint)}
+.week button.on i{color:var(--accent)}
+
+/* ---------- readiness ---------- */
+.chip.rd-SET{border-color:var(--good);color:var(--good)}
+.chip.rd-PRICED{border-color:var(--accent);color:var(--accent)}
+.chip.rd-EARLY{border-color:var(--warn);color:var(--warn)}
+.chip.rd-PENCIL{border-color:var(--line);color:var(--faint)}
+.chip.rd-LIVE{border-color:var(--bad);color:var(--bad)}
+
+/* ---------- verdict ---------- */
+.verdict{display:flex;gap:9px;align-items:flex-start;padding:9px 11px;border-radius:10px;
+  background:var(--panel2);border:1px solid var(--line);margin:10px 0 0;font-size:13px}
+.verdict .act{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.7px;
+  padding:3px 7px;border-radius:5px;border:1px solid;flex:none;margin-top:1px}
+.act-BET{color:var(--best-ink);background:var(--best-bg);border-color:var(--best-bg)}
+.act-LEAN{color:var(--lean);border-color:var(--lean)}
+.act-WATCH{color:var(--warn);border-color:var(--warn)}
+.act-WAIT,.act-PASS{color:var(--dim);border-color:var(--line)}
+
+/* ---------- what to bet ---------- */
+.card.today{border-color:var(--accent)}
+.card.today > .hd{background:color-mix(in srgb,var(--accent) 10%,var(--panel2))}
+.playline{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;padding:9px 0;
+  border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13px}
+.playline:last-child{border-bottom:0}
+.playline .big{font-size:15px;font-weight:600;font-family:var(--sans)}
+.playline .amt{margin-left:auto;font-weight:600}
+@media (max-width:720px){.playline .amt{margin-left:0;flex:1 0 100%}}
+
+/* ---------- history ---------- */
+.statrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:7px;
+  margin:2px 0 12px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.stat .k{color:var(--faint);font-size:9px;text-transform:uppercase;letter-spacing:.7px}
+.stat .v{font-family:var(--mono);font-size:17px;font-weight:600;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.stat .n{color:var(--dim);font-size:10.5px}
+/* Reliability: two values per confidence bucket - what the model said and what
+   happened - so they are grouped bars, not stacked. Stacking two things that
+   are meant to be compared is the one thing this chart must not do. */
+.rel{display:flex;align-items:flex-end;gap:10px;height:96px;margin:10px 0 2px;
+  padding-bottom:0;border-bottom:1px solid var(--line)}
+.rel .grp{flex:1;display:flex;align-items:flex-end;justify-content:center;gap:3px;height:100%}
+.rel .grp span{width:14px;border-radius:3px 3px 0 0;display:block;min-height:2px}
+.rel .pred{background:var(--line);border:1px solid var(--faint);border-bottom:0}
+.rel .act{background:var(--accent)}
+.rel-x{display:flex;gap:10px;margin-top:4px}
+.rel-x div{flex:1;text-align:center;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.rel-key{display:flex;gap:14px;font-size:11px;color:var(--dim);margin:6px 0 0;
+  font-family:var(--mono);flex-wrap:wrap}
+.rel-key i{width:10px;height:10px;border-radius:2px;display:inline-block;
+  vertical-align:-1px;margin-right:5px}
+.rel-key .p{background:var(--line);border:1px solid var(--faint)}
+.rel-key .a{background:var(--accent)}

@@ -10,7 +10,7 @@ const T = Q.get("theme");
 if (T === "light" || T === "dark") document.documentElement.dataset.theme = T;
 
 const S = { index: null, slate: null, ratings: null, perf: null, results: null,
-            mine: [], storageOK: true,
+            preds: null, mine: [], storageOK: true,
             date: Q.get("date") || null, tab: Q.get("tab") || "slate" };
 
 const L = (typeof MLBLedger !== "undefined") ? MLBLedger : null;
@@ -100,6 +100,23 @@ function syncURL() {
 }
 
 /* ------------------------------------------------------------ game cards */
+const READY_LABEL = { SET: "ready", PRICED: "priced", EARLY: "no prices yet",
+                     PENCIL: "starter TBA", LIVE: "live" };
+
+function readyChip(g) {
+  const r = g.readiness;
+  if (!r) return "";
+  return `<span class="chip rd-${esc(r)}" title="${esc(g.readiness_note || "")}">${
+    esc(READY_LABEL[r] || r)}</span>`;
+}
+
+function verdictBlock(g) {
+  const v = g.verdict;
+  if (!v) return "";
+  return `<div class="verdict"><span class="act act-${esc(v.action)}">${esc(v.action)}</span>
+    <span>${esc(v.text)}</span></div>`;
+}
+
 function weatherChip(w) {
   if (!w) return "";
   if (w.roof_closed) return `<span class="chip">roof closed</span>`;
@@ -126,13 +143,15 @@ function distBars(hist, marketTotal) {
     <div class="axis"><span>0 runs</span><span>total runs scored</span><span>22+</span></div>`;
 }
 
-function spBlock(sp, team, penEra) {
+function spBlock(sp, team, pen) {
+  pen = pen || {};
   if (!sp) return "";
   const posted = sp.posted && sp.era != null;
   return `<div class="sp">
     <div class="team">${esc(team)} starter</div>
     <div class="who">${esc(sp.name || "TBA")}${sp.hand ? ` <span class="team">${esc(sp.hand)}HP</span>` : ""}</div>
     <div class="line">${posted ? `
+      ${sp.rest != null && sp.rest <= 6 ? `<span>rest <b>${sp.rest}d</b></span>` : ""}
       <span>ERA <b>${num(sp.era)}</b></span>
       <span>WHIP <b>${num(sp.whip)}</b></span>
       <span>K/9 <b>${num(sp.k9, 1)}</b></span>
@@ -140,8 +159,15 @@ function spBlock(sp, team, penEra) {
       <span>IP <b>${sp.ip ?? "—"}</b></span>
       <span>~<b>${sp.bf_per_start ?? "—"}</b> BF/start</span>`
       : `<span>no season line — modeled as a bullpen game</span>`}
-      <span>pen ERA <b>${num(penEra)}</b></span>
-    </div></div>`;
+      <span>pen ERA <b>${num(pen.era)}</b></span>
+      ${(pen.unavailable || []).length
+        ? `<span class="badc">${pen.unavailable.length} arm(s) unavailable</span>` : ""}
+      ${(pen.tired || []).length
+        ? `<span class="warnc">${pen.tired.length} worked</span>` : ""}
+    </div>
+    ${(pen.unavailable || []).length ? `<div class="sup" style="margin-top:4px">
+      Down: ${(pen.unavailable || []).map(a => esc(a.name) + " (" + esc(a.why) + ")").join(", ")}
+    </div>` : ""}</div>`;
 }
 
 /* The edge meter is a magnitude encoding, so it is one hue on a fixed scale
@@ -317,6 +343,40 @@ function bestChip(g) {
     ${addBtn(g, b)}</div>`;
 }
 
+/* Markets nobody publishes a free price for. The simulation produces them
+   anyway, so the fair number is printed and you can shop it by hand. */
+function derivedBlock(g) {
+  const d = g.derived, s = g.sim;
+  if (!d) return "";
+  const tt = d.team_totals || {};
+  const row = (t) => tt[t] ? `<tr>
+      <td data-primary>${esc(t)} team total</td>
+      <td>${tt[t].line}</td>
+      <td class="num">${esc(tt[t].over)}</td>
+      <td class="num">${esc(tt[t].under)}</td>
+      <td class="num">${num(tt[t].mean)}</td>
+      <td class="num">${d.shutout ? num(d.shutout[t], 1) + "%" : "—"}</td></tr>` : "";
+  return `<div class="scroll"><table class="rt">
+    <thead><tr><th>Market</th><th>Line</th><th class="num">Over / Yes</th>
+      <th class="num">Under / No</th><th class="num">Projected</th>
+      <th class="num">Shutout</th></tr></thead>
+    <tbody>
+      <tr><td data-primary>First 5 innings</td>
+        <td>${g.f5_fair.total}</td>
+        <td class="num">${esc(g.f5_fair.away)} ${esc(g.away)}</td>
+        <td class="num">${esc(g.f5_fair.home)} ${esc(g.home)}</td>
+        <td class="num">${num(s.mean_f5_total)}</td>
+        <td class="num">tie ${g.f5_fair.tie_pct}%</td></tr>
+      <tr><td data-primary>No run in the 1st</td>
+        <td>NRFI</td>
+        <td class="num">${esc(d.nrfi.yes)}</td>
+        <td class="num">${esc(d.nrfi.no)}</td>
+        <td class="num">${num(d.nrfi.mean_runs)}</td>
+        <td class="num">${num(d.nrfi.yes_pct, 1)}%</td></tr>
+      ${row(g.away)}${row(g.home)}
+    </tbody></table></div>`;
+}
+
 function gameCard(g) {
   const s = g.sim, o = g.odds || {};
   const pa = s.p_away_final ?? s.p_away, ph = s.p_home_final ?? s.p_home;
@@ -335,6 +395,7 @@ function gameCard(g) {
       ${weatherChip(g.weather)}
       <span class="chip ${g.lineups_confirmed ? "ok" : ""}">${
         g.lineups_confirmed ? "lineups confirmed" : "lineups projected"}</span>
+      ${readyChip(g)}
       ${o.book ? `<span class="chip">${esc(o.book)}</span>` : `<span class="chip warnc">no price</span>`}
     </div>
   </div>
@@ -352,12 +413,13 @@ function gameCard(g) {
       </div>
       ${bestChip(g)}
     </div>
+    ${verdictBlock(g)}
 
     <details class="gd" open>
     <summary class="gsum">Full breakdown — starters, run distribution, every market</summary>
     <div class="grid2">
-      ${spBlock(g.away_sp, g.away, (g.away_pen || {}).era)}
-      ${spBlock(g.home_sp, g.home, (g.home_pen || {}).era)}
+      ${spBlock(g.away_sp, g.away, g.away_pen)}
+      ${spBlock(g.home_sp, g.home, g.home_pen)}
     </div>
 
     ${distBars(g.hist, o.total)}
@@ -366,14 +428,13 @@ function gameCard(g) {
 
     <div class="why">${esc(g.rationale)}</div>
 
-    <details><summary>First five innings, model line and lineups</summary>
+    <details><summary>Derived markets, model line and lineups</summary>
+      ${derivedBlock(g)}
       <div class="note">
-        F5 fair prices: <b>${esc(g.away)} ${esc(g.f5_fair.away)}</b> ·
-        <b>${esc(g.home)} ${esc(g.f5_fair.home)}</b> ·
-        tie ${g.f5_fair.tie_pct}% · projected F5 total <b>${num(s.mean_f5_total)}</b>
-        (${num(s.mean_f5_away)}–${num(s.mean_f5_home)}).
         Full-game fair total <b>${g.model_line.total}</b>, market
         <b>${o.total ?? "—"}</b>. Simulation standard error ±${(s.se * 100).toFixed(2)}%.
+        ${g.defense ? `Defensive efficiency ${esc(g.away)} ${num(g.defense[g.away], 3)} ·
+          ${esc(g.home)} ${num(g.defense[g.home], 3)} (league ${num(g.defense.league, 3)}).` : ""}
       </div>
       <div class="grid2" style="margin-top:8px">
         <div class="scroll">${lineupTable(g.away_lineup, g.away)}</div>
@@ -386,6 +447,53 @@ function gameCard(g) {
 }
 
 /* ----------------------------------------------------------------- views */
+/* The whole point of the page in one card: what to bet, what to lean on, and
+   what the model has no opinion about. Everything below it is the working. */
+function whatToBet() {
+  const games = (S.slate || {}).games || [];
+  const plays = [], leans = [], watches = [];
+  games.forEach(g => (g.bets || []).forEach(b => {
+    if (b.stake > 0) plays.push({ g, b });
+    else if (b.tier === "BEST BET" || b.tier === "GOOD") leans.push({ g, b });
+  }));
+  games.forEach(g => { if (g.verdict && g.verdict.action === "WATCH") watches.push(g); });
+  plays.sort((a, b) => b.b.stake - a.b.stake || b.b.edge - a.b.edge);
+  leans.sort((a, b) => b.b.edge - a.b.edge);
+
+  const risk = plays.reduce((s, p) => s + p.b.stake, 0);
+  const line = ({ g, b }, withStake) => `<div class="playline">
+    <span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span>
+    <span class="big">${esc(b.label)}</span>
+    <span>${esc(b.price_txt)}</span>
+    ${b.book ? `<span class="sup">${esc(b.book)}</span>` : ""}
+    <span class="${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%</span>
+    <span class="sup">${esc(g.away)}@${esc(g.home)} ${timeET(g.start)}</span>
+    ${withStake ? `<span class="amt">${money(b.stake)} → ${money(b.to_win)}</span>`
+                : `<span class="amt sup">${esc(b.suppressed
+                     || (b.lock_fails || [])[0] || "no stake")}</span>`}
+    ${addBtn(g, b)}</div>`;
+
+  const v = el("div", "card today");
+  v.innerHTML = `<div class="hd"><div class="match">What to bet${
+      S.date === ((S.index || {}).latest) ? " today" : ` — ${esc(S.date || "")}`}</div>
+    <div class="meta">
+      <span class="chip ${plays.length ? "ok" : ""}">${plays.length} bet(s)</span>
+      <span class="chip">${money(risk)} at risk</span>
+      <span class="chip">${games.length} games</span></div></div>
+  <div class="body">
+    ${plays.length ? plays.map(p => line(p, true)).join("")
+      : `<div class="note"><b>Nothing to bet.</b> That is a result, not a failure — the
+         market is priced where the model is. ${
+           leans.length ? "The closest calls are below." : ""}</div>`}
+    ${leans.length ? `<details${plays.length ? "" : " open"}><summary>
+       ${leans.length} number(s) the model likes but will not stake</summary>
+       ${leans.slice(0, 8).map(p => line(p, false)).join("")}</details>` : ""}
+    ${watches.length ? `<div class="note">${watches.length} game(s) not priced yet —
+       fair lines are published on each card, so you can shop them when the number lands.</div>` : ""}
+  </div>`;
+  return v;
+}
+
 function viewSlate() {
   const v = el("div");
   const games = (S.slate || {}).games || [];
@@ -407,6 +515,7 @@ function viewSlate() {
   if (pf.plays_trimmed) notes.push(`${pf.plays_trimmed} play(s) trimmed to the daily limit`);
   if (pf.exposure_scaled) notes.push(`stakes scaled ×${pf.scale_factor} to respect the exposure cap`);
   if (notes.length) v.append(el("div", "note", "Portfolio rules: " + notes.join(" · ") + "."));
+  v.append(whatToBet());
   v.append(el("div", "", scaleLegend()));
   games.forEach(g => v.append(gameCard(g)));
   return v;
@@ -705,10 +814,116 @@ function tierTable(by, title, note) {
       </tr>`; }).join("")}</tbody></table></div></div></div>`;
 }
 
+function statRow(items) {
+  return `<div class="statrow">${items.map(([k, val, n, cls]) => `<div class="stat">
+    <div class="k">${esc(k)}</div><div class="v ${cls || ""}">${esc(String(val))}</div>
+    <div class="n">${esc(n || "")}</div></div>`).join("")}</div>`;
+}
+
+/* Every game the model called, whether or not there was a bet in it. This is
+   the record that says whether it understands baseball; the bet ledger only
+   says whether it found soft numbers. */
+function predictionsBlock() {
+  const P = S.preds;
+  if (!P || !P.overall || !P.overall.n)
+    return `<div class="card"><div class="hd"><div class="match">Game predictions</div></div>
+      <div class="body"><div class="note">Every game gets a prediction recorded whether you
+      bet it or not. They start scoring as soon as games finish.</div></div></div>`;
+  const o = P.overall, vm = P.vs_market || {}, cal = P.calibration || {};
+  const better = vm.market_brier != null && vm.model_brier != null
+    ? vm.model_brier < vm.market_brier : null;
+
+  // Scale to the range the bars actually live in (roughly 50-80%) so the
+  // difference between predicted and actual is visible rather than a rounding
+  // error at the top of a 0-100 axis.
+  const relRows = P.reliability || [];
+  const vals = relRows.flatMap(r => [r.predicted, r.actual]);
+  const lo = Math.max(0, Math.min(...vals, 0.5) - 0.05);
+  const hi = Math.min(1, Math.max(...vals, 0.6) + 0.05);
+  const h = v => Math.max(3, Math.round(((v - lo) / Math.max(hi - lo, 1e-6)) * 100));
+  const rel = relRows.map(r => `<div class="grp"
+      title="${esc(r.bucket)}: model said ${pct(r.predicted)}, actually happened ${pct(r.actual)} over ${r.n} games">
+      <span class="pred" style="height:${h(r.predicted)}%"></span>
+      <span class="act" style="height:${h(r.actual)}%"></span></div>`).join("");
+  const relAxis = relRows.map(r => `<div>${esc(r.bucket)}<br>${r.n}</div>`).join("");
+
+  return `<div class="card"><div class="hd"><div class="match">Game predictions</div>
+    <div class="meta"><span class="chip">${o.n} graded</span>
+      <span class="chip">${P.pending || 0} pending</span></div></div>
+  <div class="body">
+    <div class="note">Every game on the schedule is predicted and scored — bet or not.
+      This is the record of whether the model reads baseball correctly.</div>
+    ${statRow([
+      ["Winners called", `${o.correct}-${o.n - o.correct}`, pct(o.accuracy) + " right"],
+      ["Brier score", o.brier ?? "—", "lower is better", ""],
+      ["vs market", vm.market_brier == null ? "—" : (better ? "ahead" : "behind"),
+       vm.market_brier == null ? "" : `market ${vm.market_brier}`,
+       better === null ? "" : (better ? "pos" : "neg")],
+      ["Total error", o.mae_total ?? "—", "runs, average miss"],
+      ["Total bias", o.bias_total == null ? "—" : (o.bias_total > 0 ? "+" : "") + o.bias_total,
+       o.bias_total > 0 ? "projecting high" : "projecting low",
+       Math.abs(o.bias_total || 0) > 0.3 ? "neg" : ""],
+      ["Score error", o.mae_runs ?? "—", "runs per team"],
+      ["Over/under lean", o.total_lean_acc == null ? "—" : pct(o.total_lean_acc),
+       `${o.total_lean_n || 0} with a market number`],
+      ["Last 30", (P.last30 || {}).accuracy == null ? "—" : pct(P.last30.accuracy),
+       "recent form"],
+    ])}
+    ${rel ? `<div class="note" style="margin-top:4px"><b>Calibration.</b> For every
+      confidence bucket, what the model said against what actually happened. The pairs
+      should match — a taller blue bar means the model is underselling itself, a taller
+      grey bar means it is too sure.</div>
+      <div class="rel">${rel}</div><div class="rel-x">${relAxis}</div>
+      <div class="rel-key"><span><i class="p"></i>model said</span>
+        <span><i class="a"></i>actually happened</span>
+        <span>axis ${pct(lo, 0)}–${pct(hi, 0)}</span></div>` : ""}
+    <div class="note"><b>Learning from it.</b> ${cal.applied
+      ? `Applied: totals shifted ${cal.total_adj > 0 ? "+" : ""}${cal.total_adj} runs and
+         confidence scaled ×${cal.prob_scale}, learned from ${cal.n} graded games.`
+      : `Not applied yet — ${esc(cal.reason || "waiting for more games")}. Corrections switch
+         on at ${cal.min_games || 150} graded games and are capped either way.`}</div>
+    ${(P.confirmed_lineups || {}).n ? `<div class="scroll"><table class="rt">
+      <thead><tr><th>Split</th><th class="num">Games</th><th class="num">Winners</th>
+        <th class="num">Brier</th><th class="num">Total error</th></tr></thead>
+      <tbody>${[["Lineups confirmed", P.confirmed_lineups],
+                ["Lineups projected", P.projected_lineups],
+                ["Last 100", P.last100]].filter(([, b]) => b && b.n).map(([k, b]) => `<tr>
+        <td data-primary>${esc(k)}</td><td class="num">${b.n}</td>
+        <td class="num">${pct(b.accuracy)}</td><td class="num">${b.brier ?? "—"}</td>
+        <td class="num">${b.mae_total ?? "—"}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${(P.team_bias || []).length ? `<details><summary>Which clubs the model reads wrong</summary>
+      <div class="note">Negative means the model projects them for fewer runs than they
+      score.</div><div class="scroll"><table class="rt">
+      <thead><tr><th>Team</th><th class="num">Games</th><th class="num">Run bias</th>
+        <th class="num">Avg miss</th></tr></thead>
+      <tbody>${P.team_bias.map(t => `<tr><td data-primary>${esc(t.team)}</td>
+        <td class="num">${t.n}</td>
+        <td class="num ${sgn(-t.bias)}">${t.bias > 0 ? "+" : ""}${t.bias}</td>
+        <td class="num">${t.mae}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
+    ${(P.recent || []).length ? `<details><summary>Every graded game</summary>
+      <div class="scroll"><table class="rt">
+      <thead><tr><th>Date</th><th>Game</th><th>Pick</th><th class="num">Conf</th>
+        <th class="num">Projected</th><th class="num">Final</th><th>Result</th>
+        <th class="num">Total miss</th></tr></thead>
+      <tbody>${P.recent.slice().reverse().map(r => `<tr>
+        <td data-primary>${esc(r.away)}@${esc(r.home)}</td>
+        <td>${esc(r.date)}</td>
+        <td>${esc(r.pick)}</td>
+        <td class="num">${pct(r.pick_conf, 0)}</td>
+        <td class="num">${num(r.proj_away)}–${num(r.proj_home)}</td>
+        <td class="num">${r.final_away}–${r.final_home}</td>
+        <td class="${r.correct ? "pos" : "neg"}">${r.correct ? "right" : "wrong"}</td>
+        <td class="num ${Math.abs(r.err_total || 0) > 3 ? "neg" : ""}">${
+          r.err_total > 0 ? "+" : ""}${num(r.err_total, 1)}</td></tr>`).join("")}
+      </tbody></table></div></details>` : ""}
+  </div></div>`;
+}
+
 function viewAccuracy() {
   const p = S.perf;
-  if (!p) return el("div", "empty", "No performance data yet.");
   const v = el("div");
+  v.insertAdjacentHTML("beforeend", predictionsBlock());
+  if (!p) return v;
   const cal = p.calibration || [];
 
   // Two different questions, kept apart on purpose: is the model any good, and
@@ -829,9 +1044,37 @@ function labelTables(root) {
   });
 }
 
+/* The schedule runs a week ahead. The strip says, per day, how much of the
+   picture has actually arrived - because a game with no starter named is not
+   the same thing as one an hour from first pitch. */
+function weekStrip() {
+  const dates = ((S.index || {}).dates || []).slice().sort();
+  if (dates.length < 2) return "";
+  const today = (S.index || {}).latest || S.date;
+  const forward = dates.filter(d => d >= today).slice(0, 8);
+  const back = dates.filter(d => d < today).slice(-2);
+  const show = back.concat(forward);
+  const counts = (S.index || {}).day_summary || {};
+  return `<div class="week">${show.map(d => {
+    const c = counts[d] || {};
+    const dt = new Date(d + "T12:00:00Z");
+    const dow = dt.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+    const dm = dt.toLocaleDateString("en-US", { month: "numeric", day: "numeric", timeZone: "UTC" });
+    const note = d === today ? "today"
+      : c.plays ? `${c.plays} play${c.plays === 1 ? "" : "s"}`
+      : c.priced ? `${c.priced} priced`
+      : c.games ? `${c.games} games`
+      : d < today ? "played" : "scheduled";
+    return `<button data-date="${esc(d)}" class="${d === S.date ? "on" : ""}">
+      ${esc(dow)}<b>${esc(dm)}</b><i>${esc(note)}</i></button>`;
+  }).join("")}</div>`;
+}
+
 function renderView() {
   const v = $("#view");
   v.innerHTML = "";
+  const strip = weekStrip();
+  if (strip) v.insertAdjacentHTML("beforeend", strip);
   const map = { slate: viewSlate, bets: viewBets, matchups: viewMatchups,
                 mine: viewMine, ratings: viewRatings,
                 accuracy: viewAccuracy, model: viewModel };
@@ -953,6 +1196,9 @@ function onClick(ev) {
     return;
   }
 
+  const day = ev.target.closest("button[data-date]");
+  if (day) { loadDate(day.dataset.date); return; }
+
   const act = ev.target.closest("[data-act]");
   if (!act) return;
   const a = act.dataset.act;
@@ -1041,6 +1287,7 @@ async function boot() {
   S.ratings = await getJSON("data/ratings.json");
   S.perf = await getJSON("data/performance.json");
   S.results = await getJSON("data/results.json") || { games: {} };
+  S.preds = await getJSON("data/predictions.json");
   if (L) {
     S.storageOK = L.available();
     S.mine = L.load();

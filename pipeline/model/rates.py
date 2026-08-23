@@ -136,3 +136,101 @@ def baserunning_index(batters: list[dict]) -> float:
     sb = sum(b.get("sb", 0.0) for b in batters)
     rate = sb / pa
     return float(np.clip(0.90 + (rate / 0.020) * 0.10, 0.88, 1.12))
+
+
+def blend_windows(season_counts: dict, season_denom: float,
+                  recent_counts: dict | None, recent_denom: float,
+                  league: np.ndarray, prior: float, recent_weight: float,
+                  min_recent: float) -> np.ndarray:
+    """
+    Season line with a rolling window mixed in.
+
+    Season-to-date is the right base - it has the sample. But it is slow to
+    notice a hitter who stopped hitting in June, and by September a bad month is
+    only a tenth of the total. Mixing a weighted copy of the recent window into
+    the counts moves the estimate without throwing away the sample.
+    """
+    counts = dict(season_counts)
+    denom = float(season_denom)
+    # A feed that returns counts adding up to more than the plate appearances
+    # it claims is broken, and blending it produces run environments that are
+    # not baseball. Drop the window rather than trust it.
+    if recent_counts and sum(recent_counts.values()) > recent_denom * 1.02:
+        recent_counts = None
+    if recent_counts and recent_denom >= min_recent and recent_weight > 0:
+        # add the window a second time, scaled, so it pulls without dominating
+        extra = (recent_weight / max(1.0 - recent_weight, 1e-6))
+        scale = extra * (season_denom / max(recent_denom, 1.0))
+        scale = min(scale, 3.0)
+        for k in counts:
+            counts[k] = counts.get(k, 0.0) + recent_counts.get(k, 0.0) * scale
+        denom += recent_denom * scale
+    return shrink(counts, denom, league, prior)
+
+
+def regress_hr(vec: np.ndarray, league: np.ndarray, strength: float) -> np.ndarray:
+    """
+    Pull a pitcher's home run rate toward league average.
+
+    Home runs per ball in the air is the noisiest thing a pitcher appears to
+    control, and most of a surprising rate is the ballpark, the weather and luck
+    rather than the arm. This is the idea behind xFIP, applied directly to the
+    outcome vector so it flows through the simulation.
+    """
+    if strength <= 0:
+        return vec
+    v = vec.copy()
+    target = league[I_HR]
+    v[I_HR] = v[I_HR] * (1 - strength) + target * strength
+    s = v.sum()
+    return v / s if s > 0 else vec
+
+
+def split_vector(overall_counts: dict, overall_pa: float,
+                 split_counts: dict | None, split_pa: float,
+                 league: np.ndarray, prior_overall: float,
+                 prior_split: float) -> np.ndarray:
+    """
+    A hitter's rates against this specific hand, regressed toward his own
+    overall line rather than toward the league - a split is a small sample of a
+    player we already know a lot about.
+    """
+    overall = shrink(overall_counts, overall_pa, league, prior_overall)
+    if not split_counts or split_pa <= 0:
+        return overall
+    if sum(split_counts.values()) > split_pa * 1.02:      # same guard
+        return overall
+    v = np.zeros(NOUT)
+    v[I_BB] = split_counts.get("bb", 0.0)
+    v[I_K] = split_counts.get("k", 0.0)
+    v[I_1B] = split_counts.get("s", 0.0)
+    v[I_2B] = split_counts.get("d", 0.0)
+    v[I_3B] = split_counts.get("t", 0.0)
+    v[I_HR] = split_counts.get("hr", 0.0)
+    v[I_OUT] = max(split_pa - v.sum(), 0.0)
+    v = v + overall * prior_split
+    s = v.sum()
+    return v / s if s > 0 else overall
+
+
+def team_der(counts: dict, tbf: float) -> float | None:
+    """
+    Defensive efficiency: the share of balls put in play that the defense turns
+    into outs. Covers the part of run prevention the pitcher's own strikeout,
+    walk and home run rates cannot explain.
+    """
+    if tbf <= 0:
+        return None
+    bip = tbf - counts.get("k", 0.0) - counts.get("bb", 0.0) - counts.get("hr", 0.0)
+    if bip <= 0:
+        return None
+    hits_in_play = counts.get("s", 0.0) + counts.get("d", 0.0) + counts.get("t", 0.0)
+    return float(np.clip(1.0 - hits_in_play / bip, 0.55, 0.80))
+
+
+def defense_mult(der: float | None, league_der: float | None, strength: float) -> float:
+    """A better defense turns more balls in play into outs - so fewer hits."""
+    if der is None or league_der is None or league_der <= 0:
+        return 1.0
+    gap = (der - league_der) / max(1.0 - league_der, 1e-6)
+    return float(np.clip(1.0 - gap * strength, 0.90, 1.10))

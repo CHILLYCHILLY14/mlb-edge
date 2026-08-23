@@ -282,3 +282,129 @@ def team_season_hitting(team_id: int, season: int = SEASON) -> dict:
         for sp in s.get("splits", []):
             st = sp.get("stat")
     return st or {}
+
+
+def _counts_from(st: dict) -> dict:
+    h = _f(st.get("hits"))
+    d2, d3, hr = _f(st.get("doubles")), _f(st.get("triples")), _f(st.get("homeRuns"))
+    bb, hbp, so = _f(st.get("baseOnBalls")), _f(st.get("hitByPitch")), _f(st.get("strikeOuts"))
+    return {"bb": bb + hbp, "k": so, "s": max(h - d2 - d3 - hr, 0.0),
+            "d": d2, "t": d3, "hr": hr}
+
+
+# ---------------------------------------------------------- platoon splits --
+def hitting_splits(person_ids: list[int], season: int = SEASON) -> dict:
+    """
+    Per-hitter performance against left- and right-handed pitching.
+
+    Replaces a single league-average platoon constant with what the hitter has
+    actually done. The constant is fine for a whole lineup; it is badly wrong for
+    the individual bats that decide a close projection.
+    """
+    ids = [str(i) for i in person_ids if i]
+    out = {}
+    for chunk in (ids[i:i + 40] for i in range(0, len(ids), 40)):
+        url = (f"{BASE}/people?personIds={','.join(chunk)}"
+               f"&hydrate=stats(group=hitting,type=statSplits,sitCodes=[vl,vr],season={season})")
+        js = get_json(url, cache_hours=CACHE_TTL_STATS_H, quiet=True)
+        if not js:
+            continue
+        for p in js.get("people", []):
+            rec = {}
+            for s in (p.get("stats") or []):
+                for sp in (s.get("splits") or []):
+                    code = ((sp.get("split") or {}).get("code") or "").lower()
+                    st = sp.get("stat") or {}
+                    pa = _f(st.get("plateAppearances"))
+                    if code in ("vl", "vr") and pa > 0:
+                        rec[code] = {"pa": pa, "counts": _counts_from(st)}
+            if rec:
+                out[p["id"]] = rec
+    return out
+
+
+# ------------------------------------------------------------ recent form --
+def stats_by_range(person_ids: list[int], group: str, start: str, end: str,
+                   season: int = SEASON) -> dict:
+    """
+    Stats over a date window only. Season-to-date numbers are the right base but
+    they are slow to notice a hitter who stopped hitting in June, so the model
+    blends a rolling window on top.
+    """
+    ids = [str(i) for i in person_ids if i]
+    out = {}
+    for chunk in (ids[i:i + 40] for i in range(0, len(ids), 40)):
+        url = (f"{BASE}/people?personIds={','.join(chunk)}"
+               f"&hydrate=stats(group={group},type=byDateRange,"
+               f"startDate={start},endDate={end},season={season})")
+        js = get_json(url, cache_hours=CACHE_TTL_STATS_H, quiet=True)
+        if not js:
+            continue
+        for p in js.get("people", []):
+            st = _first_split(p)
+            if not st:
+                continue
+            denom = _f(st.get("plateAppearances")) if group == "hitting" else _f(st.get("battersFaced"))
+            if denom <= 0:
+                continue
+            out[p["id"]] = {"denom": denom, "counts": _counts_from(st)}
+    return out
+
+
+# ------------------------------------------------------ bullpen availability -
+def boxscore_usage(game_pk: int) -> dict:
+    """{pitcherId: {pitches, outs, bf, started}} for one finished game."""
+    js = get_json(f"{BASE}/game/{game_pk}/boxscore", cache_hours=48.0, quiet=True)
+    out = {}
+    if not js:
+        return out
+    for side in ("away", "home"):
+        team = (js.get("teams") or {}).get(side) or {}
+        players = team.get("players") or {}
+        order = team.get("pitchers") or []
+        for n, pid in enumerate(order):
+            p = players.get(f"ID{pid}") or {}
+            st = ((p.get("stats") or {}).get("pitching") or {})
+            if not st:
+                continue
+            out[pid] = {
+                "pitches": _f(st.get("numberOfPitches")),
+                "outs": _ip_to_outs(st.get("inningsPitched")),
+                "bf": _f(st.get("battersFaced")),
+                "started": n == 0,
+            }
+    return out
+
+
+def recent_workload(team_ids: list[int], dates: list[str]) -> dict:
+    """
+    Who has thrown, how much, and how recently.
+
+    Returns {pitcherId: {"days": {date: {...}}, "pitches_1": .., "pitches_2": ..,
+    "apps_3": .., "last": date, "last_start": date}}.
+    """
+    want = set(team_ids)
+    out: dict[int, dict] = {}
+    for i, ds in enumerate(dates):                     # dates newest first
+        for g in schedule(ds):
+            if g["abstract"] != "Final":
+                continue
+            if g["away_id"] not in want and g["home_id"] not in want:
+                continue
+            for pid, u in boxscore_usage(g["gamePk"]).items():
+                rec = out.setdefault(pid, {"days": {}, "apps_3": 0, "pitches_1": 0.0,
+                                           "pitches_2": 0.0, "pitches_3": 0.0,
+                                           "last": None, "last_start": None})
+                rec["days"][ds] = u
+                if i == 0:
+                    rec["pitches_1"] += u["pitches"]
+                if i <= 1:
+                    rec["pitches_2"] += u["pitches"]
+                if i <= 2:
+                    rec["pitches_3"] += u["pitches"]
+                    rec["apps_3"] += 1
+                if rec["last"] is None or ds > rec["last"]:
+                    rec["last"] = ds
+                if u["started"] and (rec["last_start"] is None or ds > rec["last_start"]):
+                    rec["last_start"] = ds
+    return out

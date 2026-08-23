@@ -10,14 +10,16 @@ mlb_api.get_json = fake_api.responder
 espn.get_json = fake_api.responder
 weather.get_json = fake_api.responder
 
-from pipeline import build as B, grade as G, config as C
+from pipeline import build as B, grade as G, predict as PR, config as C
 
 if __name__ == "__main__":
     out = sys.argv[1] if len(sys.argv) > 1 else "docs/data"
-    past = ["2026-08-18", "2026-08-19", "2026-08-20"]
+    days = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+    past = ["2026-08-16", "2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20"]
     for d in past:
         B.main(["--date", d, "--days", "1", "--out", out, "--no-grade"])
         fake_api.FINAL_DATES.add(d)
     G.grade_all()
-    B.main(["--date", "2026-08-21", "--days", "2", "--out", out])
+    PR.grade()
+    B.main(["--date", "2026-08-21", "--days", str(days), "--out", out])
     print("sample feed written to", out)

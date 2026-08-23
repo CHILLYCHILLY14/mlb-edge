@@ -122,6 +122,118 @@ def _total_from(o):
     return tot, ov, un
 
 
+def _books_from(comp, home_abbr, away_abbr) -> list[dict]:
+    """Every provider ESPN returned for this game, normalised."""
+    books = []
+    for o in (comp.get("odds") or []):
+        ml_a, ml_h = _ml_from(o)
+        rl, rl_h, rl_a = _runline_from(o, home_abbr, away_abbr)
+        tot, ov, un = _total_from(o)
+        name = ((o.get("provider") or {}).get("name") or "book")
+        if ml_a is None and tot is None:
+            continue
+        books.append({"book": name, "ml_away": ml_a, "ml_home": ml_h,
+                      "rl_line": rl, "rl_home": rl_h, "rl_away": rl_a,
+                      "total": tot, "over": ov, "under": un})
+    return books
+
+
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def _best_price(prices):
+    """The most favourable American price on offer for one selection."""
+    prices = [p for p in prices if p is not None]
+    if not prices:
+        return None, None
+    return max(prices, key=lambda p: american_decimal(p)), None
+
+
+def american_decimal(a: float) -> float:
+    a = float(a)
+    return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
+
+
+def _devig_pair(pa, pb):
+    """Power-method de-vig, kept local so this module has no model imports."""
+    if pa is None or pb is None:
+        return None, None
+    ia = 100.0 / (pa + 100.0) if pa > 0 else abs(pa) / (abs(pa) + 100.0)
+    ib = 100.0 / (pb + 100.0) if pb > 0 else abs(pb) / (abs(pb) + 100.0)
+    if ia <= 0 or ib <= 0:
+        s = ia + ib
+        return (ia / s, ib / s) if s > 0 else (0.5, 0.5)
+    lo, hi = 0.5, 2.0
+    for _ in range(60):
+        k = (lo + hi) / 2
+        if ia ** k + ib ** k > 1:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    a, b = ia ** k, ib ** k
+    s = a + b
+    return a / s, b / s
+
+
+def _consensus(books: list[dict], home_abbr, away_abbr) -> dict:
+    """
+    Collapse several books into one market view.
+
+    Two different numbers come out of this and they do different jobs. The
+    CONSENSUS - the median no-vig probability across books - is the market's
+    real opinion, and that is what the edge is measured against. The BEST PRICE
+    is the number you would actually bet, which is usually not from the same
+    book. Measuring edge against the best price instead would manufacture an
+    edge on every game simply by shopping.
+    """
+    if not books:
+        return {}
+    out = {"books": [b["book"] for b in books], "n_books": len(books)}
+
+    # ---- moneyline
+    pa = [_devig_pair(b["ml_away"], b["ml_home"])[0] for b in books]
+    ph = [_devig_pair(b["ml_away"], b["ml_home"])[1] for b in books]
+    out["cons_away"], out["cons_home"] = _median(pa), _median(ph)
+    ml_a, _ = _best_price([b["ml_away"] for b in books])
+    ml_h, _ = _best_price([b["ml_home"] for b in books])
+    out["ml_away"], out["ml_home"] = ml_a, ml_h
+    out["ml_away_book"] = next((b["book"] for b in books if b["ml_away"] == ml_a), None)
+    out["ml_home_book"] = next((b["book"] for b in books if b["ml_home"] == ml_h), None)
+
+    # ---- run line: use the modal line, price only books posting it
+    lines = [b["rl_line"] for b in books if b["rl_line"] is not None]
+    rl = max(set(lines), key=lines.count) if lines else -1.5
+    at = [b for b in books if b["rl_line"] == rl] or books
+    out["rl_line"] = rl
+    out["rl_home"], _ = _best_price([b["rl_home"] for b in at])
+    out["rl_away"], _ = _best_price([b["rl_away"] for b in at])
+    ch = [_devig_pair(b["rl_home"], b["rl_away"])[0] for b in at]
+    ca = [_devig_pair(b["rl_home"], b["rl_away"])[1] for b in at]
+    out["cons_rl_home"], out["cons_rl_away"] = _median(ch), _median(ca)
+
+    # ---- total: same treatment, modal line
+    tots = [b["total"] for b in books if b["total"] is not None]
+    if tots:
+        t = max(set(tots), key=tots.count)
+        at = [b for b in books if b["total"] == t]
+        out["total"] = t
+        out["over"], _ = _best_price([b["over"] for b in at])
+        out["under"], _ = _best_price([b["under"] for b in at])
+        co = [_devig_pair(b["over"], b["under"])[0] for b in at]
+        cu = [_devig_pair(b["over"], b["under"])[1] for b in at]
+        out["cons_over"], out["cons_under"] = _median(co), _median(cu)
+        out["total_book"] = next((b["book"] for b in at if b["over"] == out["over"]), None)
+        # how much books disagree - a wide spread of totals means a soft market
+        out["total_spread"] = round(max(tots) - min(tots), 1)
+    return out
+
+
 def odds_for_date(date_str: str) -> dict:
     """'YYYY-MM-DD' -> {(AWAY,HOME): odds record}."""
     d = date_str.replace("-", "")
@@ -134,28 +246,25 @@ def odds_for_date(date_str: str) -> dict:
         for comp in ev.get("competitions", []):
             teams = {}
             for c in comp.get("competitors", []):
-                side = c.get("homeAway")
-                teams[side] = _abbr((c.get("team") or {}).get("abbreviation"))
+                teams[c.get("homeAway")] = _abbr((c.get("team") or {}).get("abbreviation"))
             if "home" not in teams or "away" not in teams:
                 continue
-            o = _pick_odds(comp.get("odds"))
-            if not o:
+            books = _books_from(comp, teams["home"], teams["away"])
+            if not books:
                 continue
-            ml_a, ml_h = _ml_from(o)
-            rl, rl_h, rl_a = _runline_from(o, teams["home"], teams["away"])
-            tot, ov, un = _total_from(o)
-            book = ((o.get("provider") or {}).get("name") or "ESPN")
-            out[(teams["away"], teams["home"])] = {
-                "book": book,
-                "ml_away": ml_a, "ml_home": ml_h,
-                "rl_line": rl if rl is not None else -1.5,
-                "rl_home": rl_h if rl_h is not None else -110.0,
-                "rl_away": rl_a if rl_a is not None else -110.0,
-                "total": tot, "over": ov if ov is not None else -110.0,
-                "under": un if un is not None else -110.0,
-                "fetched_at": fetched,
-                "espn_id": ev.get("id"),
-            }
+            rec = _consensus(books, teams["home"], teams["away"])
+            if rec.get("ml_away") is None and rec.get("total") is None:
+                continue
+            rec.setdefault("rl_line", -1.5)
+            rec["rl_home"] = rec.get("rl_home") if rec.get("rl_home") is not None else -110.0
+            rec["rl_away"] = rec.get("rl_away") if rec.get("rl_away") is not None else -110.0
+            rec["over"] = rec.get("over") if rec.get("over") is not None else -110.0
+            rec["under"] = rec.get("under") if rec.get("under") is not None else -110.0
+            rec["book"] = (f"{rec['n_books']} books"
+                           if rec["n_books"] > 1 else rec["books"][0])
+            rec["fetched_at"] = fetched
+            rec["espn_id"] = ev.get("id")
+            out[(teams["away"], teams["home"])] = rec
     return out
 
 

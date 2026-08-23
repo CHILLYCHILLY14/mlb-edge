@@ -25,8 +25,11 @@ from .model import portfolio
 from .model.price import price_game, f5_fair
 from .model.simulate import SidePack, simulate_game, derive
 from .sources import espn, parks, weather
-from .sources.mlb_api import (TEAM_ABBR, people_stats, schedule, standings,
-                              team_batters, team_pitchers)
+from .model.price import derived_lines
+from .sources.mlb_api import (TEAM_ABBR, hitting_splits, people_stats, recent_workload,
+                              schedule, standings, stats_by_range, team_batters,
+                              team_pitchers)
+from . import predict
 
 ET = timezone(timedelta(hours=-4))       # display only; all logic runs in UTC
 
@@ -54,11 +57,21 @@ def save_json(path, obj):
 
 # ------------------------------------------------------- roster gathering ---
 class League:
-    """Fetch-once cache of every roster we need, plus the league baseline."""
+    """
+    Fetch-once cache of everything the model needs about every club: rosters,
+    a rolling recent-form window, handedness splits, defensive efficiency, and
+    who in each bullpen has already been used up this week.
+    """
 
     def __init__(self):
         self.bat: dict[int, list] = {}
         self.pit: dict[int, list] = {}
+        self.recent_bat: dict[int, dict] = {}
+        self.recent_pit: dict[int, dict] = {}
+        self.splits: dict[int, dict] = {}
+        self.der: dict[int, float] = {}
+        self.league_der: float | None = None
+        self.usage: dict[int, dict] = {}
         self.baseline = R.LEAGUE_FALLBACK.copy()
 
     def load(self, team_ids: list[int]) -> None:
@@ -70,17 +83,101 @@ class League:
         allb = [b for v in self.bat.values() for b in v]
         if allb:
             self.baseline = R.league_baseline(allb)
+        self._load_defense()
 
-    def pitcher_vec(self, p: dict | None, is_sp: bool) -> np.ndarray:
+    def _load_defense(self) -> None:
+        """Defensive efficiency per club, from its own pitching aggregate."""
+        if not C.USE_TEAM_DEFENSE:
+            return
+        tot = {k: 0.0 for k in ("bb", "k", "s", "d", "t", "hr")}
+        tbf = 0.0
+        for tid, pitchers in self.pit.items():
+            c = {k: sum(p["counts"].get(k, 0.0) for p in pitchers) for k in tot}
+            t = sum(p.get("tbf", 0.0) for p in pitchers)
+            der = R.team_der(c, t)
+            if der is not None:
+                self.der[tid] = der
+            for k in tot:
+                tot[k] += c[k]
+            tbf += t
+        self.league_der = R.team_der(tot, tbf)
+
+    def load_form(self, team_ids: list[int], start: str, end: str) -> None:
+        """The rolling window and the platoon splits, in bulk."""
+        bat_ids, pit_ids = [], []
+        for tid in team_ids:
+            bat_ids += [b["id"] for b in self.bat.get(tid, []) if b.get("id")]
+            pit_ids += [p["id"] for p in self.pit.get(tid, []) if p.get("id")]
+        bat_ids = [i for i in bat_ids if i not in self.recent_bat]
+        pit_ids = [i for i in pit_ids if i not in self.recent_pit]
+        if C.RECENT_WEIGHT_BAT > 0 and bat_ids:
+            self.recent_bat.update(stats_by_range(bat_ids, "hitting", start, end))
+            for i in bat_ids:
+                self.recent_bat.setdefault(i, {})
+        if C.RECENT_WEIGHT_PIT > 0 and pit_ids:
+            self.recent_pit.update(stats_by_range(pit_ids, "pitching", start, end))
+            for i in pit_ids:
+                self.recent_pit.setdefault(i, {})
+        if C.USE_REAL_SPLITS:
+            need = [b["id"] for tid in team_ids for b in self.bat.get(tid, [])
+                    if b.get("id") and b["id"] not in self.splits]
+            if need:
+                self.splits.update(hitting_splits(need))
+                for i in need:
+                    self.splits.setdefault(i, {})
+
+    def load_usage(self, team_ids: list[int], dates: list[str]) -> None:
+        if C.PEN_LOOKBACK_DAYS > 0 and not self.usage:
+            self.usage = recent_workload(team_ids, dates)
+
+    # ---------------------------------------------------------- vectors ----
+    def batter_vec(self, b: dict, hand: str | None) -> np.ndarray:
+        """One hitter's outcome rates: season, plus recent form, plus the
+        platoon split against the hand he is facing tonight."""
+        rec = self.recent_bat.get(b.get("id")) or {}
+        base_counts, base_pa = b["counts"], b["pa"]
+        if rec.get("denom"):
+            merged = R.blend_windows(base_counts, base_pa, rec["counts"], rec["denom"],
+                                     self.baseline, 0.0, C.RECENT_WEIGHT_BAT,
+                                     C.RECENT_MIN_PA)
+            # blend_windows with prior 0 returns rates; rebuild pseudo-counts
+            base_counts = {k: float(merged[i]) * base_pa for k, i in
+                           (("bb", R.I_BB), ("k", R.I_K), ("s", R.I_1B),
+                            ("d", R.I_2B), ("t", R.I_3B), ("hr", R.I_HR))}
+        sp = (self.splits.get(b.get("id")) or {}) if C.USE_REAL_SPLITS else {}
+        code = "vl" if (hand or "R").upper() == "L" else "vr"
+        rec_split = sp.get(code)
+        if rec_split:
+            return R.split_vector(base_counts, base_pa, rec_split["counts"],
+                                  rec_split["pa"], self.baseline,
+                                  C.PRIOR_PA_BATTER, C.SPLIT_PRIOR_PA)
+        return R.shrink(base_counts, base_pa, self.baseline, C.PRIOR_PA_BATTER)
+
+    def pitcher_vec(self, p: dict | None, is_sp: bool, penalty: float = 0.0) -> np.ndarray:
         if not p:
             return self.baseline.copy()
         prior = C.PRIOR_TBF_SP if is_sp else C.PRIOR_TBF_RP
-        return R.shrink(p["counts"], p.get("tbf", 0.0), self.baseline, prior)
+        counts, tbf = p["counts"], p.get("tbf", 0.0)
+        rec = self.recent_pit.get(p.get("id")) or {}
+        if rec.get("denom") and C.RECENT_WEIGHT_PIT > 0:
+            v = R.blend_windows(counts, tbf, rec["counts"], rec["denom"],
+                                self.baseline, 0.0, C.RECENT_WEIGHT_PIT,
+                                C.RECENT_MIN_TBF)
+            counts = {k: float(v[i]) * tbf for k, i in
+                      (("bb", R.I_BB), ("k", R.I_K), ("s", R.I_1B),
+                       ("d", R.I_2B), ("t", R.I_3B), ("hr", R.I_HR))}
+        vec = R.shrink(counts, tbf, self.baseline, prior)
+        vec = R.regress_hr(vec, self.baseline, C.HR_REGRESS_PITCHER)
+        if penalty > 0:                     # short rest, or a worked bullpen
+            vec = R.apply_multipliers(vec, 1.0 + 2.0 * penalty, 1.0 + penalty,
+                                      1.0 - 0.5 * penalty)
+        return vec
 
 
 # ------------------------------------------------------------- narrative ----
 def rationale(g, d, best, away_sp, home_sp, wx, park, lineup_conf,
-              p_away_f=None, p_home_f=None):
+              p_away_f=None, p_home_f=None, away_pen=None, home_pen=None,
+              away_rest=None, home_rest=None):
     """Plain-English reason the number is what it is - drivers, not adjectives."""
     bits = []
     a, h = g["away"], g["home"]
@@ -107,6 +204,14 @@ def rationale(g, d, best, away_sp, home_sp, wx, park, lineup_conf,
         bits.append("Roof shut, weather neutralised.")
     elif abs(wx.get("applied_pct", 0)) >= 1.0:
         bits.append(f"Weather {wx['applied_pct']:+.1f}% run environment ({wx['note']}).")
+    for side, pen in ((g["away"], away_pen), (g["home"], home_pen)):
+        out = (pen or {}).get("unavailable") or []
+        if out:
+            names = ", ".join(a["name"] for a in out[:3])
+            bits.append(f"{side} bullpen down {len(out)} arm(s) ({names}) on recent workload.")
+    for side, sp, rest in ((g["away"], away_sp, away_rest), (g["home"], home_sp, home_rest)):
+        if sp and rest is not None and rest < C.SP_SHORT_REST_DAYS:
+            bits.append(f"{sp['name']} on {rest} days rest.")
     bits.append("Confirmed batting orders." if lineup_conf
                 else "Projected batting orders - lineups not posted yet.")
     if best and best["tier"] != "PASS":
@@ -277,19 +382,84 @@ def power_ratings(lg: League, sd: dict) -> list[dict]:
 
 
 # ----------------------------------------------------------------- one day --
-def build_date(date_str: str, lg: League, sd: dict, manual: dict) -> dict:
+READINESS = {
+    "LIVE":   "in progress or final",
+    "SET":    "priced, both starters posted, lineups confirmed",
+    "PRICED": "priced, both starters posted",
+    "EARLY":  "starters posted, no prices yet",
+    "PENCIL": "starter not announced",
+}
+
+
+def readiness_of(g, odds, both_sp, lineups_confirmed) -> str:
+    if g["abstract"] in ("Live", "Final"):
+        return "LIVE"
+    priced = bool(odds.get("ml_away") or odds.get("total"))
+    if not both_sp:
+        return "PENCIL"
+    if not priced:
+        return "EARLY"
+    return "SET" if lineups_confirmed else "PRICED"
+
+
+def verdict_of(bets, readiness, days_out) -> dict:
+    """One line telling you what to do with this game, in plain words."""
+    live = [b for b in bets if b["stake"] > 0]
+    best = bets[0] if bets else None
+    if readiness == "PENCIL":
+        return {"action": "WAIT", "text": "No starter announced yet — nothing to price."}
+    if readiness == "EARLY":
+        if best and best["tier"] != "PASS":
+            return {"action": "WATCH",
+                    "text": f"No prices posted yet. Model makes it {best['label']} "
+                            f"at fair {best['fair_price']} — worth checking when the number lands."}
+        return {"action": "WATCH", "text": "No prices posted yet. Fair lines published above."}
+    if live:
+        b = live[0]
+        book = f" at {b['book']}" if b.get("book") else ""
+        return {"action": "BET",
+                "text": f"Bet {b['label']} at {b['price_txt']}{book} for "
+                        f"${b['stake']:.2f} to win ${b['to_win']:.2f} "
+                        f"({b['tier']}, {b['edge_pct']:+.2f}% edge)."}
+    if best and best["tier"] in ("GOOD", "BEST BET"):
+        why = best.get("suppressed") or (best.get("lock_fails") or [None])[0]
+        return {"action": "LEAN",
+                "text": f"{best['label']} is the number, {best['edge_pct']:+.2f}% edge"
+                        + (f" — no stake: {why}." if why else " — no stake today.")}
+    if best and best["tier"] == "LEAN":
+        return {"action": "LEAN",
+                "text": f"Slight lean to {best['label']} ({best['edge_pct']:+.2f}%). "
+                        f"Not enough to bet."}
+    return {"action": "PASS", "text": "No edge. The market is priced where the model is."}
+
+
+def build_date(date_str: str, lg: League, sd: dict, manual: dict,
+               calib: dict | None = None, days_out: int = 0) -> dict:
     print(f"[{date_str}] fetching schedule…")
     games = schedule(date_str)
     if not games:
         print("  no games")
-        return {"date": date_str, "games": [], "generated_at": _now()}
+        return {"date": date_str, "games": [], "generated_at": _now(), "days_out": days_out}
 
     team_ids = sorted({g["away_id"] for g in games} | {g["home_id"] for g in games})
     print(f"  {len(games)} games, loading {len(team_ids)} rosters…")
     lg.load(team_ids)
+    lg.load_form(team_ids, *_recent_window())
 
-    print("  fetching odds…")
-    odds_map = espn.odds_for_date(date_str)
+    odds_map = {}
+    if days_out <= C.ODDS_LOOKAHEAD_DAYS:
+        print("  fetching odds…")
+        odds_map = espn.odds_for_date(date_str)
+    else:
+        print("  beyond the odds window — publishing fair lines only")
+
+    calib = calib or {}
+    total_adj = float(calib.get("total_adj") or 0.0)
+    prob_scale = float(calib.get("prob_scale") or 1.0)
+    # A learned runs-per-game correction is applied as a run-environment nudge,
+    # not bolted onto the finished score, so it flows through every market the
+    # simulation produces instead of only the total.
+    calib_env = 1.0 + (total_adj / 8.7) if total_adj else 1.0
 
     out_games = []
     for gi, g in enumerate(games):
@@ -304,7 +474,6 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict) -> dict:
         ap = lg.pit.get(g["away_id"], [])
         hp = lg.pit.get(g["home_id"], [])
 
-        # confirmed lineup players who are not on the active roster payload
         missing = [i for i in (g["away_lineup"] + g["home_lineup"])
                    if i not in {b["id"] for b in ab + hb}]
         extra = people_stats(missing, "hitting") if missing else {}
@@ -321,23 +490,38 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict) -> dict:
             a_sp = a_sp or (px.get(g["away_sp"]["id"]) if g["away_sp"] else None)
             h_sp = h_sp or (px.get(g["home_sp"]["id"]) if g["home_sp"] else None)
 
-        a_pen = T.bullpen_composite(ap, exclude_id=(a_sp or {}).get("id"))
-        h_pen = T.bullpen_composite(hp, exclude_id=(h_sp or {}).get("id"))
+        a_rest, a_pen_mult = T.starter_rest(a_sp, lg.usage, date_str)
+        h_rest, h_pen_mult = T.starter_rest(h_sp, lg.usage, date_str)
 
-        a_sp_vec = lg.pitcher_vec(a_sp, True)
-        h_sp_vec = lg.pitcher_vec(h_sp, True)
+        a_pen = T.bullpen_composite(ap, exclude_id=(a_sp or {}).get("id"), usage=lg.usage)
+        h_pen = T.bullpen_composite(hp, exclude_id=(h_sp or {}).get("id"), usage=lg.usage)
+
+        a_sp_vec = lg.pitcher_vec(a_sp, True, a_pen_mult)
+        h_sp_vec = lg.pitcher_vec(h_sp, True, h_pen_mult)
         a_pen_vec = lg.pitcher_vec(a_pen, False)
         h_pen_vec = lg.pitcher_vec(h_pen, False)
 
         hr_m, hit_m = R.park_weather_mults(park, wx)
+        hr_m *= calib_env
+        hit_m *= (1.0 + (calib_env - 1.0) * 0.5)
 
-        # away hits against the HOME staff, and vice versa
+        # each side hits against the other side's defense
+        a_def = R.defense_mult(lg.der.get(g["home_id"]), lg.league_der, C.DEFENSE_STRENGTH)
+        h_def = R.defense_mult(lg.der.get(g["away_id"]), lg.league_der, C.DEFENSE_STRENGTH)
+
+        h_sp_hand = (h_sp or {}).get("hand") or (g["home_sp"] or {}).get("hand", "R")
+        a_sp_hand = (a_sp or {}).get("hand") or (g["away_sp"] or {}).get("hand", "R")
+        a_vecs = {("sp", i): lg.batter_vec(b, h_sp_hand) for i, b in enumerate(a_lineup)}
+        a_vecs.update({("pen", i): lg.batter_vec(b, None) for i, b in enumerate(a_lineup)})
+        h_vecs = {("sp", i): lg.batter_vec(b, a_sp_hand) for i, b in enumerate(h_lineup)}
+        h_vecs.update({("pen", i): lg.batter_vec(b, None) for i, b in enumerate(h_lineup)})
+
         A = T.side_matrices(a_lineup, h_sp_vec, T.tto_vector(h_sp_vec), h_pen_vec,
-                            lg.baseline, (g["home_sp"] or {}).get("hand", "R"),
-                            hr_m, hit_m, -C.HOME_FIELD_ADV)
+                            lg.baseline, h_sp_hand, hr_m, hit_m * a_def,
+                            -C.HOME_FIELD_ADV, bat_vectors=a_vecs)
         H = T.side_matrices(h_lineup, a_sp_vec, T.tto_vector(a_sp_vec), a_pen_vec,
-                            lg.baseline, (g["away_sp"] or {}).get("hand", "R"),
-                            hr_m, hit_m, +C.HOME_FIELD_ADV)
+                            lg.baseline, a_sp_hand, hr_m, hit_m * h_def,
+                            +C.HOME_FIELD_ADV, bat_vectors=h_vecs)
 
         a_pack = SidePack(*A, bf_mean=_bf(h_sp), bf_sd=C.SP_BF_SD,
                           bf_min=C.SP_BF_MIN, bf_max=C.SP_BF_MAX,
@@ -347,17 +531,31 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict) -> dict:
                           adv=R.baserunning_index(hb), no_starter=a_sp is None)
 
         sim = simulate_game(a_pack, h_pack, C.N_SIMS, seed=C.RANDOM_SEED + g["gamePk"])
+        man = manual.get(str(g["gamePk"]), {})
         d = derive(sim, o.get("total"), o.get("rl_line", -1.5),
-                   (manual.get(str(g["gamePk"]), {}).get("f5") or {}).get("total"))
+                   (man.get("f5") or {}).get("total"))
 
-        bets = price_game(g, d, o, manual.get(str(g["gamePk"])))
-        best = bets[0] if bets else None
+        # a learned confidence correction, applied before anything is priced
+        if prob_scale != 1.0:
+            d["p_home"] = predict.apply_prob_scale(d["p_home"], prob_scale)
+            d["p_away"] = 1.0 - d["p_home"]
+
+        both_sp = bool(a_sp and h_sp)
         conf = a_conf and h_conf
+        ready = readiness_of(g, o, both_sp, conf)
 
-        # The number we publish everywhere is the one we actually bet: the
-        # simulation after it has been pulled toward the no-vig market price.
-        # The raw simulation is kept alongside it rather than shown in its
-        # place, so a card never quotes two different win probabilities.
+        bets = price_game(g, d, o, man)
+        # Nothing gets staked days ahead of a price that will move, or on a game
+        # whose picture is still incomplete. The read is still published.
+        if days_out > C.STAKE_MAX_DAYS_OUT or ready in ("EARLY", "PENCIL"):
+            for b in bets:
+                if b["stake"] > 0:
+                    b["stake"] = 0.0
+                    b["to_win"] = 0.0
+                    b["suppressed"] = ("too far out to size"
+                                       if days_out > C.STAKE_MAX_DAYS_OUT
+                                       else "waiting on prices and starters")
+
         p_away_f = next((b["p_final"] for b in bets
                          if b["market"] == "ML" and b["selection"] == g["away"]), d["p_away"])
         p_home_f = next((b["p_final"] for b in bets
@@ -366,46 +564,61 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict) -> dict:
         d["p_home_final"] = round(p_home_f, 4)
         d["p_sim_away"] = round(d["p_away"], 4)
         d["p_sim_home"] = round(d["p_home"], 4)
+        best = bets[0] if bets else None
 
         out_games.append({
             "gamePk": g["gamePk"], "date": date_str, "start": g["gameDate"],
             "status": g["status"], "abstract": g["abstract"], "gameType": g["gameType"],
+            "days_out": days_out, "readiness": ready, "readiness_note": READINESS[ready],
             "away": g["away"], "home": g["home"],
             "away_name": g["away_name"], "home_name": g["home_name"],
             "venue": park["name"], "park": {k: park[k] for k in ("run", "hr", "roof", "known")},
             "weather": wx,
-            "away_sp": _sp_out(a_sp, g["away_sp"]), "home_sp": _sp_out(h_sp, g["home_sp"]),
+            "away_sp": _sp_out(a_sp, g["away_sp"], a_rest),
+            "home_sp": _sp_out(h_sp, g["home_sp"], h_rest),
             "away_pen": _pen_out(a_pen), "home_pen": _pen_out(h_pen),
             "away_lineup": _lineup_out(a_lineup), "home_lineup": _lineup_out(h_lineup),
             "lineups_confirmed": conf,
+            "defense": {g["away"]: round(lg.der.get(g["away_id"], 0.0), 4),
+                        g["home"]: round(lg.der.get(g["home_id"], 0.0), 4),
+                        "league": round(lg.league_der or 0.0, 4)},
             "sim": {k: v for k, v in d.items() if k not in ("hist", "margin_hist")},
             "hist": d["hist"], "margin_hist": d["margin_hist"],
             "n_sims": C.N_SIMS,
             "model_line": {"away": fmt_american(prob_to_american(p_away_f)),
                            "home": fmt_american(prob_to_american(p_home_f)),
-                           "sim_away": fmt_american(prob_to_american(d["p_away"])),
-                           "sim_home": fmt_american(prob_to_american(d["p_home"])),
+                           "sim_away": fmt_american(prob_to_american(d["p_sim_away"])),
+                           "sim_home": fmt_american(prob_to_american(d["p_sim_home"])),
                            "total": round(d["fair_total"] * 2) / 2},
             "f5_fair": f5_fair(d),
-            "odds": o, "bets": bets,
-            "best": best,
+            "derived": derived_lines(d, g["away"], g["home"]),
+            "odds": o, "bets": bets, "best": best,
+            "verdict": verdict_of(bets, ready, days_out),
             "rationale": rationale(g, d, best, a_sp, h_sp, wx, park, conf,
-                                   p_away_f, p_home_f),
+                                   p_away_f, p_home_f, a_pen, h_pen, a_rest, h_rest),
             "away_score": g["away_score"], "home_score": g["home_score"],
         })
-        print(f"  [{gi+1}/{len(games)}] {g['away']}@{g['home']} "
+        print(f"  [{gi+1}/{len(games)}] {g['away']}@{g['home']} {ready} "
               f"{d['mean_away']:.2f}-{d['mean_home']:.2f} "
-              f"{d['p_home']*100:.1f}% home"
+              f"{p_home_f*100:.1f}% home"
               + (f" | {best['label']} {best['edge_pct']:+.2f}% {best['tier']}" if best else ""))
 
     payload = {"date": date_str, "generated_at": _now(), "games": out_games,
-               "n_games": len(out_games)}
+               "n_games": len(out_games), "days_out": days_out,
+               "calibration": {"total_adj": total_adj, "prob_scale": prob_scale,
+                               "applied": bool(calib.get("applied"))}}
     notes = portfolio.apply(payload)
     print(f"  portfolio: {notes['n_plays']} plays, ${notes['staked']:.2f} at risk, "
           f"{notes['n_best']} best bet(s)"
           + (", exposure scaled" if notes["exposure_scaled"] else "")
           + (", DIVERGENCE FLAG" if notes["divergence_flag"] else ""))
     return payload
+
+
+def _recent_window() -> tuple[str, str]:
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=C.RECENT_WINDOW_DAYS)
+    return start.isoformat(), end.isoformat()
 
 
 def _bf(sp) -> float:
@@ -415,19 +628,23 @@ def _bf(sp) -> float:
     return float(v) if v else C.SP_BF_DEFAULT
 
 
-def _sp_out(p, meta):
+def _sp_out(p, meta, rest=None):
     if not p:
         return {"name": (meta or {}).get("name", "TBA"), "posted": bool(meta),
-                "era": None, "k9": None, "whip": None, "ip": None, "hand": (meta or {}).get("hand")}
+                "era": None, "k9": None, "whip": None, "ip": None,
+                "hand": (meta or {}).get("hand"), "rest": rest}
     return {"id": p.get("id"), "name": p.get("name"), "posted": True,
             "hand": p.get("hand"), "era": p.get("era"), "whip": p.get("whip"),
             "k9": p.get("k9"), "bb9": p.get("bb9"), "hr9": p.get("hr9"),
             "ip": p.get("ip"), "gs": p.get("gs"), "tbf": p.get("tbf"),
+            "rest": rest,
             "bf_per_start": round(p.get("bf_per_start") or C.SP_BF_DEFAULT, 1)}
 
 
 def _pen_out(pen):
-    return {"era": round(pen.get("era", 0.0), 2), "arms": pen.get("n", 0)}
+    return {"era": round(pen.get("era", 0.0), 2), "arms": pen.get("n", 0),
+            "unavailable": pen.get("unavailable", []),
+            "tired": pen.get("tired", [])}
 
 
 def _lineup_out(lu):
@@ -456,7 +673,7 @@ def _now():
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=None)
-    ap.add_argument("--days", type=int, default=1)
+    ap.add_argument("--days", type=int, default=C.LOOKAHEAD_DAYS)
     ap.add_argument("--no-grade", action="store_true")
     ap.add_argument("--out", default=C.DOCS_DATA_DIR)
     args = ap.parse_args(argv)
@@ -470,9 +687,29 @@ def main(argv=None):
     lg = League()
     manual = load_json(os.path.join(C.DATA_DIR, "manual_odds.json"), {})
 
+    # Grade whatever finished before building, so today's numbers are corrected
+    # by everything the model has already got right or wrong.
+    predict.grade()
+    calib = predict.calibration()
+    if calib.get("applied"):
+        print(f"calibration: total {calib['total_adj']:+.2f} runs, "
+              f"confidence x{calib['prob_scale']:.3f} (from {calib['n']} graded games)")
+    else:
+        print(f"calibration: not applied - {calib.get('reason', '')}")
+
+    # Recent bullpen usage, read once for every club in the window.
+    hist = [(d0 - timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(1, C.PEN_LOOKBACK_DAYS + 1)]
+
     built = []
-    for ds in dates:
-        payload = build_date(ds, lg, sd, manual)
+    for i, ds in enumerate(dates):
+        if i == 0:
+            first = schedule(ds)
+            ids = sorted({g["away_id"] for g in first} | {g["home_id"] for g in first})
+            if ids:
+                print(f"reading bullpen usage over {len(hist)} day(s)…")
+                lg.load_usage(ids, hist)
+        payload = build_date(ds, lg, sd, manual, calib, days_out=i)
         save_json(os.path.join(args.out, f"slate-{ds}.json"), payload)
         built.append(payload)
 
@@ -485,15 +722,34 @@ def main(argv=None):
     from .grade import record_calls, grade_all, summarise, results_map
     for p in built:
         record_calls(p)
+        predict.record(p)
     if not args.no_grade:
         grade_all()
+        predict.grade()
     perf = summarise()
     save_json(os.path.join(args.out, "performance.json"), perf)
     save_json(os.path.join(args.out, "results.json"),
               {"generated_at": _now(), "games": results_map()})
+    preds = predict.summary()
+    preds["calibration"] = predict.calibration()
+    save_json(os.path.join(args.out, "predictions.json"), preds)
+
+    # a one-line summary per day so the dashboard's week strip can say what is
+    # actually ready on each date rather than just listing dates
+    day_summary = {}
+    for pl in built:
+        gs = pl.get("games", [])
+        day_summary[pl["date"]] = {
+            "games": len(gs),
+            "priced": sum(1 for g in gs if (g.get("odds") or {}).get("n_books")),
+            "plays": sum(1 for g in gs for b in g.get("bets", []) if b["stake"] > 0),
+            "best": sum(1 for g in gs for b in g.get("bets", []) if b["tier"] == "BEST BET"),
+            "staked": round(sum(b["stake"] for g in gs for b in g.get("bets", [])), 2),
+        }
 
     index = {
         "generated_at": _now(),
+        "day_summary": day_summary,
         "dates": sorted({*_existing_dates(args.out), *dates}),
         "latest": built[0]["date"] if built else start,
         "bankroll": C.BANKROLL,
@@ -507,6 +763,11 @@ def main(argv=None):
                      "max_slate_exposure_pct": C.MAX_SLATE_EXPOSURE_PCT,
                      "n_sims": C.N_SIMS, "season": C.SEASON},
         "record": perf.get("overall", {}),
+        "predictions": {k: preds.get("overall", {}).get(k)
+                        for k in ("n", "accuracy", "brier", "mae_total")},
+        "vs_market": preds.get("vs_market", {}),
+        "lookahead_days": len(dates),
+        "calibration": preds.get("calibration", {}),
     }
     save_json(os.path.join(args.out, "index.json"), index)
     if built:

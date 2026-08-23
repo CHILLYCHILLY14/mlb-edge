@@ -200,6 +200,7 @@ def simulate_game(away: SidePack, home: SidePack, n_sims: int,
     H = _State(home, n_sims, rng)
     all_on = np.ones(n_sims, dtype=bool)
     f5a = f5h = None
+    i1a = i1h = None
 
     for inning in range(1, 10):
         _half_inning(A, all_on, rng)
@@ -209,6 +210,8 @@ def simulate_game(away: SidePack, home: SidePack, n_sims: int,
             _half_inning(H, need, rng, walkoff_vs=A.runs)
         else:
             _half_inning(H, all_on, rng)
+        if inning == 1:
+            i1a, i1h = A.runs.copy(), H.runs.copy()
         if inning == 5:
             f5a, f5h = A.runs.copy(), H.runs.copy()
 
@@ -227,6 +230,7 @@ def simulate_game(away: SidePack, home: SidePack, n_sims: int,
 
     return {"away": A.runs.astype(np.int32), "home": H.runs.astype(np.int32),
             "f5_away": f5a.astype(np.int32), "f5_home": f5h.astype(np.int32),
+            "i1_away": i1a.astype(np.int32), "i1_home": i1h.astype(np.int32),
             "n": n_sims}
 
 
@@ -262,7 +266,17 @@ def derive(sim: dict, market_total: float | None, rl_line: float = -1.5,
         "mean_f5_home": float(sim["f5_home"].mean()),
         "hist": _hist(tot, 0, 22),
         "margin_hist": _hist(marg, -10, 10),
-        "p_nrfi": float(((a + h) >= 0).mean()),   # placeholder, replaced below
+        # First-inning market: a scoreless first is the single most-bet MLB
+        # derivative and it falls straight out of the same simulation.
+        "p_nrfi": float(((sim["i1_away"] + sim["i1_home"]) == 0).mean()),
+        "p_yrfi": float(((sim["i1_away"] + sim["i1_home"]) > 0).mean()),
+        "mean_i1": float((sim["i1_away"] + sim["i1_home"]).mean()),
+        # Team totals, from each side's own run distribution.
+        "team_total_away": _team_total(a),
+        "team_total_home": _team_total(h),
+        "p_away_shutout": float((a == 0).mean()),
+        "p_home_shutout": float((h == 0).mean()),
+        "p_extras": float((np.abs(marg) == 0).mean()),
     }
 
     if market_total is not None:
@@ -271,8 +285,29 @@ def derive(sim: dict, market_total: float | None, rl_line: float = -1.5,
         out.update(_ou(sim["f5_away"] + sim["f5_home"], f5_total, "f5"))
     out["fair_total"] = float(np.median(tot))
     out["fair_f5_total"] = float(np.median(sim["f5_away"] + sim["f5_home"]))
-    out.pop("p_nrfi", None)
     return out
+
+
+def _team_total(runs: np.ndarray) -> dict:
+    """Fair line and over/under probabilities for one team's run total."""
+    line = round(float(np.median(runs)) * 2) / 2
+    if line == int(line):
+        line += 0.5                                   # avoid a pushable line
+    return {"line": line,
+            "over": float((runs > line).mean()),
+            "under": float((runs < line).mean()),
+            "mean": float(runs.mean())}
+
+
+def team_total_ou(runs: np.ndarray, line: float) -> dict:
+    over = float((runs > line).mean())
+    under = float((runs < line).mean())
+    push = float((runs == line).mean())
+    if push > 0:
+        d = over + under
+        over = over / d if d else 0.5
+        under = 1.0 - over
+    return {"over": over, "under": under, "push": push}
 
 
 def _ou(tot: np.ndarray, line: float, prefix: str) -> dict:
