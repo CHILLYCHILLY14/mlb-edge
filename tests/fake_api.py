@@ -232,6 +232,18 @@ def _espn(date_str):
                                  "spreadOdds": rng.choice([-135, 145])},
                 "homeTeamOdds": {"moneyLine": ml_h - jitter,
                                  "spreadOdds": rng.choice([-135, 145])}})
+        # Real feeds routinely include a book that has not hung this game yet and
+        # publishes 0 across the board. That zero reached the decimal-payout
+        # conversion and divided by zero, killing a whole live build, so the
+        # fixture carries one on every third game to keep the path exercised.
+        if len(events) % 3 == 0:
+            odds_blocks.insert(0, {
+                "provider": {"name": "Unhung Book"},
+                "details": f"{TEAM_ABBR[home if fav_home else away]} -1.5",
+                "spread": -1.5, "overUnder": base_total,
+                "overOdds": 0, "underOdds": 0,
+                "awayTeamOdds": {"moneyLine": 0, "spreadOdds": 0},
+                "homeTeamOdds": {"moneyLine": 0, "spreadOdds": 0}})
         eid = 900000 + abs(hash((date_str, away, home))) % 90000
         CORE_PRICES[eid] = (ml_a, ml_h, base_total)
         events.append({"id": str(eid), "competitions": [{"id": str(eid),

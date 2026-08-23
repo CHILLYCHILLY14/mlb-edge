@@ -15,12 +15,37 @@ from .. import config as C
 
 
 # ------------------------------------------------------------ price maths ---
+def price_ok(a) -> bool:
+    """A real American price: not blank, not zero, not beyond any real board.
+
+    Feeds publish 0 for a market they have not hung yet. That is not a price of
+    even money - it is the absence of one - and letting it through divides by
+    zero on the way to a decimal payout.
+    """
+    if a is None:
+        return False
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return False
+    if a != a or a in (float("inf"), float("-inf")):
+        return False
+    return 100.0 <= abs(a) <= 5000.0
+
+
 def american_to_decimal(a: float) -> float:
+    """Decimal payout. Junk in gives 1.0 - stake back, no profit - so a bad
+    number can never look like the best price on the board."""
+    if not price_ok(a):
+        return 1.0
     a = float(a)
     return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
 
 
 def american_to_prob(a: float) -> float:
+    """Implied probability. Junk in gives 0.5 rather than raising."""
+    if not price_ok(a):
+        return 0.5
     a = float(a)
     return 100.0 / (a + 100.0) if a > 0 else abs(a) / (abs(a) + 100.0)
 
@@ -63,7 +88,10 @@ def devig_power(p_a: float, p_b: float, iters: int = 60) -> tuple[float, float]:
 
 
 def no_vig(price_a, price_b) -> tuple[float | None, float | None]:
-    if price_a is None or price_b is None:
+    # Both sides have to be real prices. Half a market de-vigged against a
+    # placeholder is not a market opinion, and it would become the number every
+    # edge on that game is measured against.
+    if not price_ok(price_a) or not price_ok(price_b):
         return None, None
     return devig_power(american_to_prob(price_a), american_to_prob(price_b))
 

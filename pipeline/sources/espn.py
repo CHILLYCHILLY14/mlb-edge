@@ -52,18 +52,18 @@ def _pick_odds(odds_list):
 
 def _ml_from(o):
     """(away_ml, home_ml) out of whichever shape ESPN used."""
-    a = _num((o.get("awayTeamOdds") or {}).get("moneyLine"))
-    h = _num((o.get("homeTeamOdds") or {}).get("moneyLine"))
+    a = _price((o.get("awayTeamOdds") or {}).get("moneyLine"))
+    h = _price((o.get("homeTeamOdds") or {}).get("moneyLine"))
     if a is None or h is None:
         cur = o.get("current") or {}
-        a = a if a is not None else _num(((cur.get("away") or {}).get("moneyLine") or {}).get("american")
+        a = a if a is not None else _price(((cur.get("away") or {}).get("moneyLine") or {}).get("american")
                                          if isinstance(cur.get("away"), dict) else None)
-        h = h if h is not None else _num(((cur.get("home") or {}).get("moneyLine") or {}).get("american")
+        h = h if h is not None else _price(((cur.get("home") or {}).get("moneyLine") or {}).get("american")
                                          if isinstance(cur.get("home"), dict) else None)
     if a is None or h is None:
         for side, key in (("awayTeamOdds", "a"), ("homeTeamOdds", "h")):
             blk = o.get(side) or {}
-            v = _num((blk.get("moneyLine") or {}).get("american") if isinstance(blk.get("moneyLine"), dict) else None)
+            v = _price((blk.get("moneyLine") or {}).get("american") if isinstance(blk.get("moneyLine"), dict) else None)
             if key == "a" and a is None:
                 a = v
             if key == "h" and h is None:
@@ -98,27 +98,27 @@ def _runline_from(o, home_abbr, away_abbr):
             line = -mag
         else:                               # no favourite named; trust the sign
             line = raw
-    hp = _num((o.get("homeTeamOdds") or {}).get("spreadOdds"))
-    ap = _num((o.get("awayTeamOdds") or {}).get("spreadOdds"))
+    hp = _price((o.get("homeTeamOdds") or {}).get("spreadOdds"))
+    ap = _price((o.get("awayTeamOdds") or {}).get("spreadOdds"))
     cur = o.get("current") or {}
     if hp is None and isinstance(cur.get("home"), dict):
-        hp = _num(((cur["home"].get("close") or cur["home"]).get("odds")))
+        hp = _price(((cur["home"].get("close") or cur["home"]).get("odds")))
     if ap is None and isinstance(cur.get("away"), dict):
-        ap = _num(((cur["away"].get("close") or cur["away"]).get("odds")))
+        ap = _price(((cur["away"].get("close") or cur["away"]).get("odds")))
     return line, hp, ap
 
 
 def _total_from(o):
     tot = _num(o.get("overUnder"))
-    ov = _num((o.get("overOdds")))
-    un = _num((o.get("underOdds")))
+    ov = _price((o.get("overOdds")))
+    un = _price((o.get("underOdds")))
     cur = o.get("current") or {}
     if tot is None and isinstance(cur.get("total"), dict):
         tot = _num((cur["total"].get("alternateDisplayValue") or cur["total"].get("value")))
     if ov is None and isinstance(cur.get("over"), dict):
-        ov = _num(cur["over"].get("american") or (cur["over"].get("close") or {}).get("odds"))
+        ov = _price(cur["over"].get("american") or (cur["over"].get("close") or {}).get("odds"))
     if un is None and isinstance(cur.get("under"), dict):
-        un = _num(cur["under"].get("american") or (cur["under"].get("close") or {}).get("odds"))
+        un = _price(cur["under"].get("american") or (cur["under"].get("close") or {}).get("odds"))
     return tot, ov, un
 
 
@@ -162,15 +162,47 @@ def _median(xs):
     return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
 
 
+def valid_price(a) -> bool:
+    """Is this a real American price?
+
+    A moneyline of 0 is not a price - it is a placeholder some feeds publish
+    for a market that has not been hung yet, and it used to reach the decimal
+    conversion and divide by zero. Nothing under 100 either way is a real
+    American number, and nothing past 5000 belongs on a baseball board.
+    """
+    if a is None:
+        return False
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return False
+    if a != a or a in (float("inf"), float("-inf")):   # NaN / infinity
+        return False
+    return 100.0 <= abs(a) <= 5000.0
+
+
+def _price(v):
+    """_num, but it only lets a usable American price through."""
+    a = _num(v)
+    return a if valid_price(a) else None
+
+
 def _best_price(prices):
     """The most favourable American price on offer for one selection."""
-    prices = [p for p in prices if p is not None]
+    prices = [p for p in prices if valid_price(p)]
     if not prices:
         return None, None
-    return max(prices, key=lambda p: american_decimal(p)), None
+    return max(prices, key=american_decimal), None
 
 
 def american_decimal(a: float) -> float:
+    """Decimal payout for an American price. Never raises on junk input.
+
+    Returns 1.0 - a bet that pays back exactly the stake - for anything that
+    is not a real price, so a bad number can never win a max() comparison.
+    """
+    if not valid_price(a):
+        return 1.0
     a = float(a)
     return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
 

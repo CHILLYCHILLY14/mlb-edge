@@ -121,6 +121,48 @@ def test_market_math():
     check("negative edge never stakes", M.kelly_stake(-0.02, -110, 250)[0] == 0.0)
 
 
+def test_junk_prices():
+    """A feed publishing 0 for a market it has not hung is not a price of even
+    money - it is the absence of one. It crashed a live build, so every entry
+    point that touches a price is checked against it here."""
+    print("\n[junk prices]")
+    from pipeline.model import market as M
+    from pipeline.model.price import _bet
+    from pipeline.sources import espn as E
+
+    junk = [0, 0.0, None, "", "abc", 50, -99, 99, 9e9, float("nan"), float("inf")]
+    for v in junk:
+        check(f"price_ok rejects {v!r}", M.price_ok(v) is False)
+    for v in (-110, 100, -100, 250, -5000, 5000):
+        check(f"price_ok accepts {v!r}", M.price_ok(v) is True)
+
+    for v in junk:
+        try:
+            d = M.american_to_decimal(v)
+            p = M.american_to_prob(v)
+            e = E.american_decimal(v)
+        except Exception as ex:                       # the original crash
+            check(f"no exception converting {v!r}", False, repr(ex))
+            continue
+        check(f"decimal of {v!r} is inert", d == 1.0 and e == 1.0, f"{d} / {e}")
+        check(f"prob of {v!r} is neutral", p == 0.5, str(p))
+
+    check("best price ignores a zero", E._best_price([0, None, -110, 150])[0] == 150)
+    check("best price of only junk is nothing", E._best_price([0, None, 50])[0] is None)
+    check("best price still shops correctly", E._best_price([-120, -105, -115])[0] == -105)
+
+    check("no_vig refuses half a market", M.no_vig(0, -110) == (None, None))
+    check("no_vig refuses a blank side", M.no_vig(-110, None) == (None, None))
+    check("no_vig still works on a real pair", M.no_vig(150, -170)[0] is not None)
+
+    ctx = {"odds_age_h": 0.5, "se": 0.004, "both_sp": True, "precip": 0.0}
+    for v in (0, None, 50, "abc"):
+        check(f"no bet is priced off {v!r}",
+              _bet("ML", "NYY", "NYY ML", v, 0.55, 0.50, 0.4, C.EDGE_CEILING, ctx) is None)
+    real = _bet("ML", "NYY", "NYY ML", -110, 0.60, 0.50, 0.4, C.EDGE_CEILING, ctx)
+    check("a real price still prices", real is not None and real["price"] == -110)
+
+
 def test_weather_model():
     print("\n[weather]")
     from pipeline.sources import weather as W
@@ -483,6 +525,7 @@ def test_full_build():
 if __name__ == "__main__":
     test_simulator_physics()
     test_market_math()
+    test_junk_prices()
     test_weather_model()
     test_full_build()
     print("\n" + ("=" * 60))

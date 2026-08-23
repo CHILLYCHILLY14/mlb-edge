@@ -471,13 +471,22 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
     health = {}
     if days_out <= C.ODDS_LOOKAHEAD_DAYS:
         print("  fetching odds…")
-        odds_map = espn.odds_for_date(date_str)
-        health = espn.feed_health(odds_map, expected_games=len(games))
-        print(f"  odds: {health['priced']}/{len(games)} games priced from "
-              f"{', '.join(health['books']) or 'no books'}"
-              + (f" via {', '.join(health['sources'])}" if health.get("sources") else ""))
-        if health["priced"] == 0:
-            print("  ! no prices found — the model will publish fair lines only")
+        # Odds come from a public feed nobody promises us anything about. A
+        # malformed payload must cost us the prices for one day, not the whole
+        # build - the model still has a fair line for every market either way.
+        try:
+            odds_map = espn.odds_for_date(date_str)
+            health = espn.feed_health(odds_map, expected_games=len(games))
+        except Exception as exc:
+            odds_map, health = {}, espn.feed_health({}, expected_games=len(games))
+            print(f"  ! odds feed failed ({type(exc).__name__}: {exc})")
+            print("  ! continuing with fair lines only")
+        else:
+            print(f"  odds: {health['priced']}/{len(games)} games priced from "
+                  f"{', '.join(health['books']) or 'no books'}"
+                  + (f" via {', '.join(health['sources'])}" if health.get("sources") else ""))
+            if health["priced"] == 0:
+                print("  ! no prices found — the model will publish fair lines only")
     else:
         print("  beyond the odds window — publishing fair lines only")
 
@@ -786,7 +795,16 @@ def main(argv=None):
             if ids:
                 print(f"reading bullpen usage over {len(hist)} day(s)…")
                 lg.load_usage(ids, hist)
-        payload = build_date(ds, lg, sd, manual, calib, days_out=i)
+        # Today is the point of the site: if it cannot be built, the run should
+        # go red and say so. A lookahead day is a bonus - losing one of those is
+        # not a reason to throw away the six days that did build.
+        try:
+            payload = build_date(ds, lg, sd, manual, calib, days_out=i)
+        except Exception as exc:
+            if i == 0:
+                raise
+            print(f"  ! {ds} failed to build ({type(exc).__name__}: {exc}) — skipping it")
+            continue
         save_json(os.path.join(args.out, f"slate-{ds}.json"), payload)
         built.append(payload)
 

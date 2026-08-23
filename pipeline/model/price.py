@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 from .. import config as C
-from .market import (american_to_decimal, blend, cap_prob, compress, fmt_american,
+from .market import (american_to_decimal, blend, cap_prob, compress, fmt_american, price_ok,
                      kelly_stake, lock_rules, no_vig, prob_to_american, raw_edge,
                      tier_for)
 
 
 def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
          ctx, is_total=False, total_gap=None, book=None, line=None):
-    if price is None:
+    # Not just None: a feed publishing 0 for a market it has not hung yet, or a
+    # typo pasted into manual_odds.json, must not become a bet. Anything that is
+    # not a real American price is treated as no price at all - the model still
+    # publishes its own fair line for the market, there is just nothing to beat.
+    if not price_ok(price):
         return None
     p_final = cap_prob(blend(p_model, p_market, blend_w))
 
