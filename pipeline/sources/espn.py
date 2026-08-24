@@ -55,6 +55,38 @@ def _ml_from(o):
     """(away_ml, home_ml) out of whichever shape ESPN used."""
     a = _price((o.get("awayTeamOdds") or {}).get("moneyLine"))
     h = _price((o.get("homeTeamOdds") or {}).get("moneyLine"))
+
+    # The site scoreboard moved its current prices into a top-level
+    # ``moneyline`` block in August 2026.  The old summary fields still carry
+    # the favourite flags but no longer carry the actual number, so only
+    # reading awayTeamOdds/homeTeamOdds turns a fully priced game into an empty
+    # market.
+    nested = o.get("moneyline") or {}
+    if isinstance(nested, dict):
+        for side, key in (("away", "a"), ("home", "h")):
+            blk = nested.get(side) or {}
+            close = blk.get("close") or blk.get("current") or blk
+            v = _price((close.get("odds") or close.get("american")
+                        or close.get("alternateDisplayValue"))
+                       if isinstance(close, dict) else close)
+            if key == "a" and a is None:
+                a = v
+            if key == "h" and h is None:
+                h = v
+
+    # The core endpoint carries the same values one level below each team's
+    # current block.  Keep this fallback because either ESPN endpoint can be
+    # populated first on a newly posted game.
+    for side, key in (("awayTeamOdds", "a"), ("homeTeamOdds", "h")):
+        blk = o.get(side) or {}
+        cur_ml = (blk.get("current") or {}).get("moneyLine") or {}
+        v = _price((cur_ml.get("american") or cur_ml.get("alternateDisplayValue"))
+                   if isinstance(cur_ml, dict) else cur_ml)
+        if key == "a" and a is None:
+            a = v
+        if key == "h" and h is None:
+            h = v
+
     if a is None or h is None:
         cur = o.get("current") or {}
         a = a if a is not None else _price(((cur.get("away") or {}).get("moneyLine") or {}).get("american")
@@ -83,13 +115,25 @@ def _runline_from(o, home_abbr, away_abbr, ml_away=None, ml_home=None):
     """
     det = (o.get("details") or "").strip()
     raw = _num(o.get("spread"))
+    point_spread = o.get("pointSpread") or {}
+    ps_home = (point_spread.get("home") or {}) if isinstance(point_spread, dict) else {}
+    ps_away = (point_spread.get("away") or {}) if isinstance(point_spread, dict) else {}
+    ps_home_close = ps_home.get("close") or ps_home.get("current") or ps_home
+    ps_away_close = ps_away.get("close") or ps_away.get("current") or ps_away
+    nested_home_line = _num((ps_home_close.get("line")
+                             or ps_home_close.get("pointSpread"))
+                            if isinstance(ps_home_close, dict) else None)
     fav = None
     parts = det.split()
     if len(parts) >= 2:
         fav = _abbr(parts[0])
         if raw is None:
             raw = _num(parts[-1])
-    if raw is None:
+    if nested_home_line is not None:
+        # Unlike the legacy top-level spread, this number explicitly belongs to
+        # the home team, so there is no favourite-sign inference to perform.
+        line = nested_home_line
+    elif raw is None:
         line = -1.5
     else:
         mag = abs(raw)
@@ -105,8 +149,33 @@ def _runline_from(o, home_abbr, away_abbr, ml_away=None, ml_home=None):
             line = -mag if ml_home < ml_away else +mag
         else:                               # nothing to go on; trust the sign
             line = raw
-    hp = _price((o.get("homeTeamOdds") or {}).get("spreadOdds"))
-    ap = _price((o.get("awayTeamOdds") or {}).get("spreadOdds"))
+    hp = _price((ps_home_close.get("odds") or ps_home_close.get("american"))
+                if isinstance(ps_home_close, dict) else None)
+    ap = _price((ps_away_close.get("odds") or ps_away_close.get("american"))
+                if isinstance(ps_away_close, dict) else None)
+    hp = hp if hp is not None else _price((o.get("homeTeamOdds") or {}).get("spreadOdds"))
+    ap = ap if ap is not None else _price((o.get("awayTeamOdds") or {}).get("spreadOdds"))
+
+    # Core odds put the run-line price in team.current.spread and the line in
+    # team.current.pointSpread.
+    for side, key in (("homeTeamOdds", "h"), ("awayTeamOdds", "a")):
+        blk = o.get(side) or {}
+        side_cur = blk.get("current") or {}
+        sp = side_cur.get("spread") or {}
+        v = _price((sp.get("american") or sp.get("alternateDisplayValue"))
+                   if isinstance(sp, dict) else sp)
+        if key == "h" and hp is None:
+            hp = v
+        if key == "a" and ap is None:
+            ap = v
+    core_home_line = (((o.get("homeTeamOdds") or {}).get("current") or {})
+                      .get("pointSpread") or {})
+    core_home_line = _num((core_home_line.get("american")
+                           or core_home_line.get("alternateDisplayValue"))
+                          if isinstance(core_home_line, dict) else core_home_line)
+    if nested_home_line is None and core_home_line is not None:
+        line = core_home_line
+
     cur = o.get("current") or {}
     if hp is None and isinstance(cur.get("home"), dict):
         hp = _price(((cur["home"].get("close") or cur["home"]).get("odds")))
@@ -119,6 +188,20 @@ def _total_from(o):
     tot = _num(o.get("overUnder"))
     ov = _price((o.get("overOdds")))
     un = _price((o.get("underOdds")))
+
+    # Current scoreboard shape: total.over.close.odds / total.under.close.odds.
+    nested = o.get("total") or {}
+    if isinstance(nested, dict):
+        over = nested.get("over") or {}
+        under = nested.get("under") or {}
+        over_close = over.get("close") or over.get("current") or over
+        under_close = under.get("close") or under.get("current") or under
+        if ov is None:
+            ov = _price((over_close.get("odds") or over_close.get("american"))
+                        if isinstance(over_close, dict) else over_close)
+        if un is None:
+            un = _price((under_close.get("odds") or under_close.get("american"))
+                        if isinstance(under_close, dict) else under_close)
     cur = o.get("current") or {}
     if tot is None and isinstance(cur.get("total"), dict):
         tot = _num((cur["total"].get("alternateDisplayValue") or cur["total"].get("value")))
@@ -364,16 +447,62 @@ def _core_books(event_id, competition_id, home_abbr, away_abbr) -> list[dict]:
     return _books_from({"odds": js.get("items") or []}, home_abbr, away_abbr)
 
 
+def _market_score(row: dict, line_key: str, price_a: str, price_b: str) -> int:
+    """How complete one book's quote is for a market."""
+    return ((1 if row.get(line_key) is not None else 0)
+            + (2 if valid_price(row.get(price_a)) else 0)
+            + (2 if valid_price(row.get(price_b)) else 0))
+
+
+def _merge_quote(first: dict, later: dict) -> dict:
+    """Combine two sightings of the same sportsbook without losing prices.
+
+    ESPN's scoreboard and core endpoints commonly return the same provider.  A
+    line-only scoreboard sighting must not shadow a complete core quote merely
+    because it was fetched first.  Markets are selected independently so a
+    complete scoreboard moneyline can coexist with a complete core total.
+    """
+    out = dict(first)
+
+    # Moneyline has no line value to keep in sync.
+    first_ml = sum(valid_price(first.get(k)) for k in ("ml_away", "ml_home"))
+    later_ml = sum(valid_price(later.get(k)) for k in ("ml_away", "ml_home"))
+    if later_ml > first_ml:
+        for key in ("ml_away", "ml_home"):
+            out[key] = later.get(key)
+    else:
+        for key in ("ml_away", "ml_home"):
+            if not valid_price(out.get(key)) and valid_price(later.get(key)):
+                out[key] = later.get(key)
+
+    # Run line and total prices only belong with the line from the same quote.
+    for line_key, a_key, b_key in (("rl_line", "rl_home", "rl_away"),
+                                   ("total", "over", "under")):
+        if _market_score(later, line_key, a_key, b_key) > _market_score(
+                first, line_key, a_key, b_key):
+            for key in (line_key, a_key, b_key):
+                out[key] = later.get(key)
+        elif later.get(line_key) == out.get(line_key):
+            for key in (a_key, b_key):
+                if not valid_price(out.get(key)) and valid_price(later.get(key)):
+                    out[key] = later.get(key)
+    return out
+
+
 def _merge_books(*groups) -> list[dict]:
-    """Books from every source, one entry per provider, first sighting wins."""
-    seen, out = set(), []
+    """Books from every source, one complete entry per provider."""
+    positions, out = {}, []
     for group in groups:
         for b in group or []:
-            name = b.get("book") or "book"
-            if name in seen:
-                continue
-            seen.add(name)
-            out.append(b)
+            name = canon_book(b.get("book") or "book")
+            row = dict(b)
+            row["book"] = name
+            if name in positions:
+                i = positions[name]
+                out[i] = _merge_quote(out[i], row)
+            else:
+                positions[name] = len(out)
+                out.append(row)
     return out
 
 
@@ -382,8 +511,12 @@ def has_priced_market(rec: dict | None) -> bool:
     """Is there anything here you could actually bet into?"""
     if not rec:
         return False
-    return (rec.get("ml_away") is not None and rec.get("ml_home") is not None) \
-        or rec.get("total") is not None
+    ml = valid_price(rec.get("ml_away")) and valid_price(rec.get("ml_home"))
+    rl = (rec.get("rl_line") is not None
+          and valid_price(rec.get("rl_home")) and valid_price(rec.get("rl_away")))
+    total = (rec.get("total") is not None
+             and valid_price(rec.get("over")) and valid_price(rec.get("under")))
+    return ml or rl or total
 
 
 def suspicious_record(rec: dict | None) -> bool:
@@ -436,12 +569,19 @@ def feed_health(records: dict, expected_games: int | None = None) -> dict:
     """
     n = len(records)
     priced = sum(1 for r in records.values() if has_priced_market(r))
-    with_ml = sum(1 for r in records.values() if r.get("ml_away") is not None)
-    with_tot = sum(1 for r in records.values() if r.get("total") is not None)
+    with_ml = sum(1 for r in records.values()
+                  if valid_price(r.get("ml_away")) and valid_price(r.get("ml_home")))
+    with_rl = sum(1 for r in records.values()
+                  if r.get("rl_line") is not None
+                  and valid_price(r.get("rl_home")) and valid_price(r.get("rl_away")))
+    with_tot = sum(1 for r in records.values()
+                   if r.get("total") is not None
+                   and valid_price(r.get("over")) and valid_price(r.get("under")))
     books = sorted({b for r in records.values() for b in (r.get("books") or [])})
     return {
         "games_with_odds": n, "expected_games": expected_games,
-        "priced": priced, "with_moneyline": with_ml, "with_total": with_tot,
+        "priced": priced, "with_moneyline": with_ml, "with_runline": with_rl,
+        "with_total": with_tot,
         "books": books, "n_books": len(books),
         "coverage": (round(priced / expected_games, 3)
                      if expected_games else None),
