@@ -11,11 +11,12 @@ if (T === "light" || T === "dark") document.documentElement.dataset.theme = T;
 
 const S = { index: null, slate: null, ratings: null, perf: null, results: null,
             preds: null, pick: null, simPick: null, simState: null, simFor: null,
-            mine: [], storageOK: true,
+            mine: [], storageOK: true, staking: null, stakePlanCache: null,
             date: Q.get("date") || null, tab: Q.get("tab") || "slate" };
 
 const L = (typeof MLBLedger !== "undefined") ? MLBLedger : null;
 const SCH = (typeof MLBSchedule !== "undefined") ? MLBSchedule : null;
+const STK = (typeof MLBStaking !== "undefined") ? MLBStaking : null;
 const todayET = () => SCH ? SCH.easternDate() : new Date().toISOString().slice(0, 10);
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -57,16 +58,93 @@ function agoTxt(iso) {
 const tierCls = t => t === "BEST BET" ? "best" : t === "GOOD" ? "good"
                     : t === "LEAN" ? "lean" : "pass";
 
+/* ----------------------------------------------------------- staking plan */
+function stakeLimits() {
+  const st = (S.index || {}).settings || {};
+  return {
+    max_stake_pct: st.max_stake_pct ?? 0.05,
+    max_slate_exposure_pct: st.max_slate_exposure_pct ?? 0.15,
+    min_stake: st.min_stake ?? 1,
+    stake_rounding: st.stake_rounding ?? 0.50,
+  };
+}
+
+function currentBankroll() {
+  return Number((S.staking || {}).bankroll) || Number((S.index || {}).bankroll) || 250;
+}
+
+function currentPlan() {
+  const sig = [S.date, (S.slate || {}).generated_at, currentBankroll(),
+               Number((S.staking || {}).kelly) || 0.25].join("|");
+  if (S.stakePlanCache && S.stakePlanCache.sig === sig) return S.stakePlanCache.plan;
+  if (!STK) {
+    const bets = {};
+    for (const g of ((S.slate || {}).games || []))
+      for (const b of (g.bets || [])) bets[`${g.gamePk}|${b.market}|${b.selection}`] = b;
+    const staked = Object.values(bets).reduce((sum, b) => sum + (Number(b.stake) || 0), 0);
+    const plan = { bets, staked, n_plays: Object.values(bets).filter(b => b.stake > 0).length,
+                   exposure_pct: staked / currentBankroll(), exposure_scaled: false };
+    S.stakePlanCache = { sig, plan };
+    return plan;
+  }
+  const plan = STK.plan(S.slate || {}, S.staking || STK.defaults(S.index), stakeLimits());
+  S.stakePlanCache = { sig, plan };
+  return plan;
+}
+
+function sized(g, b) {
+  const row = currentPlan().bets[`${g.gamePk}|${b.market}|${b.selection}`];
+  return row || { stake: 0, to_win: 0 };
+}
+
+function renderStakingControls() {
+  const box = $("#stakingControls");
+  if (!box) return;
+  const cfg = S.staking || { bankroll: currentBankroll(), kelly: 0.25 };
+  const label = STK ? STK.label(cfg.kelly) : "¼ Kelly";
+  box.innerHTML = `<div class="stake-title">Staking plan
+      <small>Changes today's suggested stakes only — the model and past results stay unchanged.</small></div>
+    <label class="stake-field">Bankroll
+      <input id="bankrollInput" type="number" min="1" max="1000000" step="25"
+        inputmode="decimal" value="${Number(cfg.bankroll).toFixed(2)}" aria-label="Betting bankroll">
+    </label>
+    <div class="stake-field"><span>Risk</span><div class="kelly-pick" role="group"
+      aria-label="Kelly fraction">
+      ${[[0.25, "¼ Kelly"], [0.5, "½ Kelly"], [1, "Full Kelly"]].map(([v, t]) =>
+        `<button type="button" data-kelly="${v}" class="${Number(cfg.kelly) === v ? "on" : ""}"
+          aria-pressed="${Number(cfg.kelly) === v}">${t}</button>`).join("")}
+    </div></div>
+    <span class="chip">${esc(label)} · 5% per bet · 15% daily cap</span>
+    <button type="button" class="stake-reset" data-stake-reset>Reset</button>`;
+}
+
+function updateStaking(next, message) {
+  if (!STK) return;
+  const base = STK.defaults(S.index);
+  S.staking = {
+    bankroll: STK.cleanBankroll(next.bankroll, base.bankroll),
+    kelly: STK.cleanKelly(next.kelly, base.kelly),
+  };
+  S.stakePlanCache = null;
+  STK.save(S.staking);
+  renderStakingControls();
+  renderKPIs();
+  renderView();
+  if (message) toast(message);
+}
+
 /* ------------------------------------------------------------------ KPIs */
 function renderKPIs() {
   const k = $("#kpis"); k.innerHTML = "";
   const p = S.perf || {}, ov = p.overall || {}, pf = (S.slate || {}).portfolio || {};
+  const plan = currentPlan();
+  const riskNote = `${pct(plan.exposure_pct || 0, 1)} of bankroll` +
+    (plan.exposure_scaled ? ` · scaled ×${plan.scale_factor}` : "");
   const cards = [
-    ["Bankroll", money(p.bankroll_now ?? (S.index || {}).bankroll),
-     `start ${money(p.bankroll_start)}`, sgn((p.bankroll_now ?? 0) - (p.bankroll_start ?? 0))],
-    ["Plays today", pf.n_plays ?? 0, `${pf.n_best ?? 0} best bet${pf.n_best === 1 ? "" : "s"}`, ""],
-    ["At risk today", money(pf.staked ?? 0),
-     pf.exposure_scaled ? `scaled ×${pf.scale_factor}` : "inside cap", ""],
+    ["Betting bankroll", money(currentBankroll()),
+     STK ? STK.label((S.staking || {}).kelly) : "¼ Kelly", ""],
+    ["Plays today", plan.n_plays ?? 0, `${pf.n_best ?? 0} best bet${pf.n_best === 1 ? "" : "s"}`, ""],
+    ["At risk today", money(plan.staked ?? 0), riskNote, ""],
     ["Settled record", `${ov.w ?? 0}-${ov.l ?? 0}${ov.p ? "-" + ov.p : ""}`,
      ov.n ? pct(ov.win_pct) + " win rate" : "no settled bets yet", ""],
     ["ROI", ov.roi == null ? "—" : pct(ov.roi, 1),
@@ -247,7 +325,8 @@ function toggleBet(id) {
     persistMine();
     toast(`Removed <b>${esc(b.label)}</b> from your ledger.`);
   } else {
-    const entry = L.entryFrom(g, b);
+    const rec = sized(g, b);
+    const entry = L.entryFrom(g, b, rec.stake > 0 ? rec.stake : 1);
     S.mine = S.mine.concat([entry]);
     persistMine();
     toast(`Added <b>${esc(b.label)}</b> at ${esc(b.price_txt)} for ${money(entry.stake)}` +
@@ -320,8 +399,9 @@ function betRows(bets, g) {
       <th class="num">Stake</th><th>Track</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
   const render = list => list.map(b => {
-    const stake = b.stake > 0
-      ? `<b>${money(b.stake)}</b><br><span class="sup">to win ${money(b.to_win)}</span>`
+    const rec = sized(g, b);
+    const stake = rec.stake > 0
+      ? `<b>${money(rec.stake)}</b><br><span class="sup">to win ${money(rec.to_win)}</span>`
       : (b.suppressed ? `<span class="sup">${esc(b.suppressed)}</span>` : "—");
     const why = (b.lock_fails && b.lock_fails.length && b.tier !== "BEST BET")
       ? `<br><span class="sup">not a lock: ${esc(b.lock_fails[0])}</span>` : "";
@@ -376,11 +456,12 @@ function bestChip(g) {
       <span class="sup">market is priced where the model is</span>
       ${g.sim_inputs ? `<button class="add" data-sim-open="${g.gamePk}"
         title="Open this game in the simulator">Simulate</button>` : ""}</div>`;
+  const rec = sized(g, b);
   return `<div class="glance-bet">
     <span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span>
     <b>${esc(b.label)}</b> <span class="mono">${esc(b.price_txt)}</span>
     <span class="${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%</span>
-    ${b.stake > 0 ? `<span class="sup">${money(b.stake)}</span>` : ""}
+    ${rec.stake > 0 ? `<span class="sup">${money(rec.stake)}</span>` : ""}
     ${addBtn(g, b)}
     ${g.sim_inputs ? `<button class="add" data-sim-open="${g.gamePk}"
       title="Open this game in the simulator">Simulate</button>` : ""}</div>`;
@@ -534,22 +615,23 @@ function whatToBet() {
   const games = (S.slate || {}).games || [];
   const plays = [], leans = [], watches = [];
   games.forEach(g => (g.bets || []).forEach(b => {
-    if (b.stake > 0) plays.push({ g, b });
+    const rec = sized(g, b);
+    if (rec.stake > 0) plays.push({ g, b, rec });
     else if (b.tier === "BEST BET" || b.tier === "GOOD") leans.push({ g, b });
   }));
   games.forEach(g => { if (g.verdict && g.verdict.action === "WATCH") watches.push(g); });
-  plays.sort((a, b) => b.b.stake - a.b.stake || b.b.edge - a.b.edge);
+  plays.sort((a, b) => b.rec.stake - a.rec.stake || b.b.edge - a.b.edge);
   leans.sort((a, b) => b.b.edge - a.b.edge);
 
-  const risk = plays.reduce((s, p) => s + p.b.stake, 0);
-  const line = ({ g, b }, withStake) => `<div class="playline">
+  const risk = plays.reduce((s, p) => s + p.rec.stake, 0);
+  const line = ({ g, b, rec }, withStake) => `<div class="playline">
     <span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span>
     <span class="big">${esc(b.label)}</span>
     <span>${esc(b.price_txt)}</span>
     ${b.book ? `<span class="sup">${esc(b.book)}</span>` : ""}
     <span class="${sgn(b.edge)}">${b.edge_pct > 0 ? "+" : ""}${num(b.edge_pct, 2)}%</span>
     <span class="sup">${esc(g.away)}@${esc(g.home)} ${timeET(g.start)}</span>
-    ${withStake ? `<span class="amt">${money(b.stake)} → ${money(b.to_win)}</span>`
+    ${withStake ? `<span class="amt">${money(rec.stake)} → ${money(rec.to_win)}</span>`
                 : `<span class="amt sup">${esc(b.suppressed
                      || (b.lock_fails || [])[0] || "no stake")}</span>`}
     ${addBtn(g, b)}</div>`;
@@ -609,10 +691,11 @@ function viewSlate() {
     return el("div", "empty", "No games scheduled for this date.");
   }
   const notes = [];
+  const plan = currentPlan();
   if (pf.correlated_suppressed) notes.push(`${pf.correlated_suppressed} correlated bet(s) suppressed`);
   if (pf.best_downgraded) notes.push(`${pf.best_downgraded} best bet(s) downgraded by the slate cap`);
   if (pf.plays_trimmed) notes.push(`${pf.plays_trimmed} play(s) trimmed to the daily limit`);
-  if (pf.exposure_scaled) notes.push(`stakes scaled ×${pf.scale_factor} to respect the exposure cap`);
+  if (plan.exposure_scaled) notes.push(`your stakes scaled ×${plan.scale_factor} to respect the exposure cap`);
   if (notes.length) v.append(el("div", "note", "Portfolio rules: " + notes.join(" · ") + "."));
   const oh = (S.slate || {}).odds_health;
   if (oh && oh.expected_games)
@@ -632,25 +715,26 @@ function viewBets() {
   const games = (S.slate || {}).games || [];
   const plays = [];
   games.forEach(g => (g.bets || []).forEach(b => {
-    if (b.stake > 0 || b.tier === "BEST BET") plays.push({ g, b });
+    const rec = sized(g, b);
+    if (rec.stake > 0 || b.tier === "BEST BET") plays.push({ g, b, rec });
   }));
   plays.sort((a, b) => b.b.edge - a.b.edge);
   if (!plays.length) return el("div", "empty",
     "No qualifying plays on this slate. That is a result, not a failure — " +
     "the market is priced where the model is.");
   const v = el("div", "card");
-  const staked = plays.filter(p => p.b.stake > 0).length;
+  const staked = plays.filter(p => p.rec.stake > 0).length;
   const flagged = plays.length - staked;
   v.innerHTML = `<div class="hd"><div class="match">Today's card</div>
     <div class="meta"><span class="chip">${staked} staked</span>
     ${flagged ? `<span class="chip">${flagged} flagged, no stake</span>` : ""}
-    <span class="chip">${money(plays.reduce((a, p) => a + p.b.stake, 0))} at risk</span></div></div>
+    <span class="chip">${money(plays.reduce((a, p) => a + p.rec.stake, 0))} at risk</span></div></div>
   <div class="body">${scaleLegend()}<div class="scroll"><table class="rt">
     <thead><tr><th>Game</th><th>Bet</th><th class="num">Price</th><th class="num">Fair</th>
       <th class="num">Model</th><th class="num">Edge</th><th class="hide-sm">Scale</th><th>Tier</th>
       <th class="num">Stake</th><th class="num">To win</th><th>Start</th>
       <th>Track</th></tr></thead>
-    <tbody>${plays.map(({ g, b }) => `<tr>
+    <tbody>${plays.map(({ g, b, rec }) => `<tr>
       <td data-primary>${esc(g.away)}@${esc(g.home)} · ${esc(b.label)}</td>
       <td class="hide-sm">${esc(b.label)}</td>
       <td class="num">${esc(b.price_txt)}${
@@ -662,9 +746,9 @@ function viewBets() {
       <td class="num ${sgn(b.edge)}">+${num(b.edge_pct, 2)}%</td>
       <td class="hide-sm">${edgeMeter(b.edge)}</td>
       <td><span class="tier ${tierCls(b.tier)}">${esc(b.tier)}</span></td>
-      <td class="num">${b.stake > 0 ? money(b.stake)
+      <td class="num">${rec.stake > 0 ? money(rec.stake)
         : `<span class="sup">${esc(b.suppressed || "no stake")}</span>`}</td>
-      <td class="num">${b.stake > 0 ? money(b.to_win) : "—"}</td>
+      <td class="num">${rec.stake > 0 ? money(rec.to_win) : "—"}</td>
       <td>${timeET(g.start)}</td>
       <td data-trail>${addBtn(g, b)}</td></tr>`).join("")}</tbody></table></div></div>`;
   return v;
@@ -722,7 +806,7 @@ function viewMatchups() {
 }
 
 function mineSummary() {
-  return L ? L.summarise(S.mine, (S.index || {}).bankroll || 0) : null;
+  return L ? L.summarise(S.mine, currentBankroll()) : null;
 }
 
 /* ============================================================== simulator ==
@@ -979,8 +1063,8 @@ function viewMine() {
     String(a.away || "").localeCompare(String(b.away || "")));
 
   const kpi = el("div", "kpis");
-  [["Your bankroll", money(sum.bankroll_now), `start ${money((S.index || {}).bankroll || 0)}`,
-    sgn(sum.bankroll_now - ((S.index || {}).bankroll || 0))],
+  [["Your bankroll", money(sum.bankroll_now), `start ${money(currentBankroll())}`,
+    sgn(sum.bankroll_now - currentBankroll())],
    ["Your record", `${sum.graded.w}-${sum.graded.l}${sum.graded.p ? "-" + sum.graded.p : ""}`,
     sum.graded.n ? pct(sum.graded.win_pct) + " win rate" : "nothing settled yet", ""],
    ["Your ROI", sum.graded.roi == null ? "—" : pct(sum.graded.roi, 1),
@@ -1376,9 +1460,11 @@ function viewModel() {
    which made the model measure real edges against a market that did not exist.</p>
 
    <p><b>5. Edge and stake.</b> Raw expected value is squashed through tanh toward a hard ceiling
-   of ${pct(st.edge_ceiling ?? 0.055, 1)}, and the stake is computed from the compressed number
-   using ${st.kelly ?? 0.25} Kelly, capped at ${pct(st.max_stake_pct ?? 0.05, 0)} of bankroll.
-   A wild readout produces a small bet instead of a disaster.</p>
+   of ${pct(st.edge_ceiling ?? 0.055, 1)}. The published card defaults to ${st.kelly ?? 0.25}
+   Kelly; the Staking plan control can resize the same approved card to quarter, half or full
+   Kelly and to your bankroll. The ${pct(st.max_stake_pct ?? 0.05, 0)} per-bet and
+   ${pct(st.max_slate_exposure_pct ?? 0.15, 0)} daily caps remain in force.
+   A wild readout still produces a small bet instead of a disaster.</p>
 
    <p><b>6. Portfolio rules.</b> Never the moneyline and the run line on the same team. At most
    three best bets and six plays on a slate. Total exposure capped across the day. If the model
@@ -1556,6 +1642,19 @@ function settlePending() {
 }
 
 function onClick(ev) {
+  const kelly = ev.target.closest("button[data-kelly]");
+  if (kelly && STK) {
+    const fraction = Number(kelly.dataset.kelly);
+    updateStaking({ ...(S.staking || {}), kelly: fraction },
+      `Staking changed to <b>${esc(STK.label(fraction))}</b>.`);
+    return;
+  }
+  if (ev.target.closest("[data-stake-reset]")) {
+    const base = STK ? STK.defaults(S.index) : null;
+    if (base) updateStaking(base, "Staking plan reset to the model default.");
+    return;
+  }
+
   const open = ev.target.closest("[data-sim-open]");
   if (open) {
     S.simPick = open.dataset.simOpen;
@@ -1602,7 +1701,7 @@ function onClick(ev) {
   if (a === "export-json")
     ioPanel("Ledger JSON",
       JSON.stringify({ schema: L.SCHEMA, exported_at: new Date().toISOString(),
-                       bankroll_start: (S.index || {}).bankroll, entries: S.mine }, null, 2),
+                       bankroll_start: currentBankroll(), entries: S.mine }, null, 2),
       "mlb-edge-ledger.json", "application/json");
   else if (a === "export-csv")
     ioPanel("Ledger CSV", L.toCSV(S.mine), "mlb-edge-ledger.csv", "text/csv");
@@ -1669,6 +1768,13 @@ function scheduleSimRun() {
 }
 
 function onChange(ev) {
+  const bankroll = ev.target.closest("#bankrollInput");
+  if (bankroll && STK) {
+    const value = STK.cleanBankroll(bankroll.value, currentBankroll());
+    updateStaking({ ...(S.staking || {}), bankroll: value },
+      `Bankroll changed to <b>${money(value)}</b>.`);
+    return;
+  }
   const pickG = ev.target.closest("select[data-simpick]");
   if (pickG) {
     S.simPick = pickG.value;
@@ -1708,6 +1814,7 @@ function shiftDate(days) {
 
 async function loadDate(ds) {
   S.date = ds;
+  S.stakePlanCache = null;
   $("#curDate").textContent = ds;
   $("#view").innerHTML = `<div class="empty">Loading ${ds}…</div>`;
   S.slate = await getJSON(`data/slate-${ds}.json`) || { date: ds, games: [] };
@@ -1720,6 +1827,10 @@ async function loadDate(ds) {
 
 async function boot() {
   S.index = await getJSON("data/index.json") || {};
+  S.staking = STK ? STK.load(S.index) : {
+    bankroll: Number(S.index.bankroll) || 250,
+    kelly: Number((S.index.settings || {}).kelly) || 0.25,
+  };
   S.ratings = await getJSON("data/ratings.json");
   S.perf = await getJSON("data/performance.json");
   S.results = await getJSON("data/results.json") || { games: {} };
@@ -1732,6 +1843,7 @@ async function boot() {
   $("#seasonTag").textContent =
     `${(S.index.settings || {}).season || ""} · ${((S.index.settings || {}).n_sims || 20000).toLocaleString()} sims/game`;
   $("#nsims").textContent = ((S.index.settings || {}).n_sims || 20000).toLocaleString();
+  renderStakingControls();
   renderTabs();
   const pick = SCH
     ? SCH.resolveDate(S.index.dates, todayET(), S.date)
