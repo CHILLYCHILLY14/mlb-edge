@@ -367,6 +367,12 @@
     return { hr: 1 + 2.2 * (m - 1), hit: 1 + 0.5 * (m - 1) };
   }
 
+  function applyProbScale(p, scale) {
+    if (Math.abs(scale - 1) < 1e-6) return p;
+    const bounded = Math.min(1 - 1e-6, Math.max(1e-6, p));
+    return 1 / (1 + Math.exp(-Math.log(bounded / (1 - bounded)) * scale));
+  }
+
   /** Replay a published game, optionally with inputs changed. */
   function runGame(inputs, tweaks, nSims, seed) {
     const t = tweaks || {};
@@ -375,10 +381,17 @@
     const home = buildPack(inputs.home, inputs.mults, league, t.home);
     const sim = simulate(away, home, nSims || 12000,
                          seed == null ? inputs.seed : seed);
-    return derive(sim, t.marketTotal, t.rlLine == null ? -1.5 : t.rlLine);
+    const result = derive(sim, t.marketTotal, t.rlLine == null ? -1.5 : t.rlLine);
+    result.p_raw_home = result.p_home;
+    result.p_raw_away = result.p_away;
+    // Older feeds store calibration at slate level; callers pass that fallback.
+    const scale = inputs.prob_scale ?? t.probScale ?? 1;
+    result.p_home = applyProbScale(result.p_home, scale);
+    result.p_away = 1 - result.p_home;
+    return result;
   }
 
   return { simulate, derive, shrink, log5, applyMultipliers, mulberry32,
-           overUnder, median, buildPack, runGame, weatherMults,
+           overUnder, median, buildPack, runGame, weatherMults, applyProbScale,
            I_BB, I_K, I_1B, I_2B, I_3B, I_HR, I_OUT };
 });

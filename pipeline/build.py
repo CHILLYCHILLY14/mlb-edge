@@ -572,6 +572,9 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
         d = derive(sim, o.get("total"), o.get("rl_line", -1.5),
                    (man.get("f5") or {}).get("total"))
 
+        # Preserve raw Monte Carlo output separately from confidence calibration.
+        d["p_raw_home"] = round(d["p_home"], 4)
+        d["p_raw_away"] = round(d["p_away"], 4)
         # a learned confidence correction, applied before anything is priced
         if prob_scale != 1.0:
             d["p_home"] = predict.apply_prob_scale(d["p_home"], prob_scale)
@@ -635,6 +638,7 @@ def build_date(date_str: str, lg: League, sd: dict, manual: dict,
             # turns round. Rounded hard - five decimals is far below the
             # Monte Carlo noise floor and keeps the feed small.
             "sim_inputs": {
+                "prob_scale": prob_scale,
                 "league": _vec(lg.baseline),
                 "mults": {"hr": round(hr_m, 5), "hit": round(hit_m, 5),
                           "def_away": round(a_def, 5), "def_home": round(h_def, 5),

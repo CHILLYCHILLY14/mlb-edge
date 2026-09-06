@@ -444,7 +444,7 @@ function blendNote(s, g) {
   const fin = s.p_home_final ?? s.p_home;
   if (s.p_sim_home == null || Math.abs(s.p_sim_home - fin) < 0.01)
     return `<span>model price, after the market blend</span>`;
-  return `<span>raw simulation had ${esc(g.away)} ${pct(s.p_sim_away)} · ` +
+  return `<span>simulation after confidence calibration had ${esc(g.away)} ${pct(s.p_sim_away)} · ` +
          `${esc(g.home)} ${pct(s.p_sim_home)} — shown above after the market blend</span>`;
 }
 
@@ -853,6 +853,7 @@ function runSim(g, st) {
   return SIM.runGame(inp, {
     away: side(inp.away, "away"), home: side(inp.home, "home"),
     marketTotal: (g.odds || {}).total, rlLine,
+    probScale: ((S.slate || {}).calibration || {}).prob_scale ?? 1,
   }, st.nSims, inp.seed);
 }
 

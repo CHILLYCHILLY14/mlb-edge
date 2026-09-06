@@ -43,6 +43,11 @@ def main() -> int:
     assert "invalid MLB_BANKROLL" in nonpositive_err, nonpositive_err
     assert "invalid MLB_SEASON" in nonpositive_err, nonpositive_err
 
+    for raw in ("nan", "inf", "-inf"):
+        parsed, error = read_config(raw, "2026")
+        assert parsed["bankroll"] == 250.0, parsed
+        assert "invalid MLB_BANKROLL" in error, error
+
     print("repository settings: PASS")
     return 0
 

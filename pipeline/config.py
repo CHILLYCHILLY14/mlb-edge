@@ -5,9 +5,28 @@ Everything tunable lives here. Nothing else in the pipeline hard-codes a knob.
 """
 from __future__ import annotations
 import os
+import math
+import sys
+
+
+def _positive_number(name: str, default: float, *, integer: bool = False):
+    """Read a friendly GitHub variable such as ``$1,250.50`` safely."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default) if integer else float(default)
+    try:
+        cleaned = str(raw).strip().replace("$", "").replace(",", "")
+        value = int(cleaned) if integer else float(cleaned)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        print(f"invalid {name}={raw!r}; using {default}", file=sys.stderr)
+        return int(default) if integer else float(default)
+
 
 # ---------------------------------------------------------------- bankroll ---
-BANKROLL          = float(os.environ.get("MLB_BANKROLL", 250.0))
+BANKROLL          = _positive_number("MLB_BANKROLL", 250.0)
 KELLY_FRACTION    = 0.25    # fractional Kelly multiplier
 MAX_STAKE_PCT     = 0.05    # hard cap: 5% of bankroll on any single bet
 MIN_STAKE         = 1.00    # do not record a bet smaller than this
@@ -104,7 +123,7 @@ ROOF_CLOSE_HOT_F  = 95.0    # ...and above this
 ROOF_CLOSE_PRECIP = 0.50    # ...and when rain is likely
 
 # -------------------------------------------------------------------- misc ---
-SEASON            = int(os.environ.get("MLB_SEASON", 2026))
+SEASON            = _positive_number("MLB_SEASON", 2026, integer=True)
 TZ_DISPLAY        = "America/New_York"
 DATA_DIR          = os.environ.get("MLB_DATA_DIR", "data")
 DOCS_DATA_DIR     = os.environ.get("MLB_DOCS_DATA_DIR", "docs/data")

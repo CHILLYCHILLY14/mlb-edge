@@ -1,6 +1,15 @@
 name: Build MLB slate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'pipeline/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'docs/*.js'
   schedule:
     # UTC. Covers the whole MLB day: morning card, midday line moves, the
     # window when lineups post, first pitch, late west-coast games, and an
@@ -55,36 +64,33 @@ jobs:
           key: mlb-cache-${{ github.run_id }}
           restore-keys: mlb-cache-
 
-      # The self-tests report, they do not gate. This dashboard is something you
-      # check every day; a failing assertion should be visible in the log, not a
-      # reason the site stops updating. Read them when a run goes amber.
+      # Validate pricing and settlement before publishing a new feed.
       - name: Self-test (pipeline)
-        continue-on-error: true
         run: python -m tests.test_pipeline
 
       - name: Self-test (dashboard ledger)
-        continue-on-error: true
         run: node tests/test_ledger.mjs
 
       - name: Self-test (date resolution)
-        continue-on-error: true
         run: node tests/test_schedule.mjs
 
       - name: Self-test (browser simulator matches the build engine)
-        continue-on-error: true
         run: node tests/test_sim.mjs docs/data
+
+      - name: Self-test (configuration and build runner)
+        run: |
+          python -m tests.test_config
+          bash tests/test_build_runner.sh
 
       - name: Build slate
         env:
           MLB_BANKROLL: ${{ vars.MLB_BANKROLL || '250' }}
           MLB_SEASON: ${{ vars.MLB_SEASON || '2026' }}
-        run: |
-          python -m pipeline.build \
-            ${{ github.event.inputs.date && format('--date {0}', github.event.inputs.date) || '' }} \
-            ${{ github.event.inputs.days && format('--days {0}', github.event.inputs.days) || '' }}
-
-      - name: Grade yesterday
-        run: python -m pipeline.build --date $(date -u -d 'yesterday' +%F) --days 1 || true
+          BUILD_DATE: ${{ inputs.date || '' }}
+          BUILD_DAYS: ${{ inputs.days || '' }}
+        # The main build already grades history. A second historical build
+        # would overwrite latest.json and the current-day index with yesterday.
+        run: bash scripts/run_build.sh
 
       - name: Commit feed, ledger and prediction history
         run: |

@@ -17,6 +17,12 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 const SIM = require("../docs/sim.js");
 
+// Fixed probabilities isolate calibration math from Monte Carlo noise.
+if (Math.abs(SIM.applyProbScale(.7, 1.2) - 0.7343405055709702) > 1e-10)
+  throw new Error("log-odds calibration differs from Python");
+if (SIM.applyProbScale(.7, 1) !== .7 || SIM.applyProbScale(.5, 1.2) !== .5)
+  throw new Error("identity and even-match calibration must be stable");
+
 const dir = process.argv[2] || "docs/data";
 let fails = 0;
 const check = (name, cond, detail = "") => {
@@ -47,7 +53,7 @@ for (const f of slates) {
     // +1.5 whenever the road team is favored. Feed the JavaScript side the same
     // line or the two are answering different questions.
     const rlLine = (g.odds && g.odds.rl_line != null) ? g.odds.rl_line : -1.5;
-    const js = SIM.runGame(g.sim_inputs, { rlLine }, N, g.sim_inputs.seed);
+    const js = SIM.runGame(g.sim_inputs, { rlLine, probScale: slate.calibration?.prob_scale ?? 1 }, N, g.sim_inputs.seed);
     const py = g.sim;
     compared++;
     dWin.push(Math.abs(js.p_home - py.p_sim_home));
@@ -73,8 +79,17 @@ check("first inning agrees", worst(dNrfi) < 0.020, `worst ${worst(dNrfi).toFixed
 
 console.log("\n[the controls move the game the way they should]");
 const slate = JSON.parse(readFileSync(path.join(dir, slates[slates.length - 1]), "utf8"));
-const game = (slate.games || []).find(g => g.sim_inputs);
+const game = slates.flatMap(f => JSON.parse(readFileSync(path.join(dir, f), "utf8")).games || [])
+  .find(g => g.sim_inputs && !g.sim_inputs.away.no_starter && !g.sim_inputs.home.no_starter);
+if (!game) throw new Error("Starter-control tests require a published game with both starters");
 const base = SIM.runGame(game.sim_inputs, {}, N, 11);
+const calibrated = SIM.runGame({...game.sim_inputs, prob_scale:1.2}, {}, N, 11);
+check("confidence calibration changes probability, not simulated scoring",
+  Math.abs(calibrated.p_home - SIM.applyProbScale(base.p_raw_home, 1.2)) < 1e-12
+  && calibrated.mean_total === base.mean_total);
+check("raw and calibrated away probabilities complement home",
+  Math.abs(calibrated.p_home + calibrated.p_away - 1) < 1e-12
+  && Math.abs(calibrated.p_raw_home + calibrated.p_raw_away - 1) < 1e-12);
 
 const hotter = SIM.runGame(game.sim_inputs,
   { away: SIM.weatherMults(1.10), home: SIM.weatherMults(1.10) }, N, 11);
