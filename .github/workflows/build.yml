@@ -75,7 +75,9 @@ jobs:
         run: node tests/test_schedule.mjs
 
       - name: Self-test (browser simulator matches the build engine)
-        run: node tests/test_sim.mjs docs/data
+        run: |
+          node tests/test_sim.mjs docs/data
+          node tests/test_sim_gate.mjs
 
       - name: Self-test (configuration and build runner)
         run: |
@@ -91,6 +93,11 @@ jobs:
         # The main build already grades history. A second historical build
         # would overwrite latest.json and the current-day index with yesterday.
         run: bash scripts/run_build.sh
+
+      # Validate the newly generated feed too. Previously only the prior feed
+      # was tested, so an unchecked snapshot could block the next scheduled run.
+      - name: Self-test (new slate simulator parity)
+        run: node tests/test_sim.mjs docs/data
 
       - name: Commit feed, ledger and prediction history
         run: |
