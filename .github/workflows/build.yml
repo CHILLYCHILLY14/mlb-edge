@@ -71,6 +71,9 @@ jobs:
       - name: Self-test (dashboard ledger)
         run: node tests/test_ledger.mjs
 
+      - name: Self-test (shared ledger round trip)
+        run: node tests/test_sync.mjs
+
       - name: Self-test (date resolution)
         run: node tests/test_schedule.mjs
 

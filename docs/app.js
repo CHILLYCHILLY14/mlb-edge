@@ -1913,6 +1913,19 @@ function queueHeight() {
   heightPending = true;
   requestAnimationFrame(() => { heightPending = false; reportHeight(); });
 }
+/* The shared-ledger adapter lives outside this closure. Rather than leave the
+   whole dashboard on the window for anything on the page to reach, hand it the
+   two things it actually needs: somewhere to put the merged bets, and a way to
+   ask for a repaint. */
+window.MLBEdgeApp = {
+  getLedger: () => S.mine,
+  setLedger: rows => { S.mine = rows; S.stakePlanCache = null; },
+  setStaking: settings => { S.staking = settings; S.stakePlanCache = null;
+                            renderStakingControls(); },
+  index: () => S.index,
+  redraw: () => { renderKPIs(); renderView(); },
+};
+
 window.addEventListener("resize", queueHeight);
 new MutationObserver(queueHeight).observe(document.body, { childList: true, subtree: true });
 
