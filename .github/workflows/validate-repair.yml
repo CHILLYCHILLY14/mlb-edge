@@ -1,0 +1,37 @@
+name: Validate MLB repair
+
+on:
+  push:
+    branches: [fix/qualification-calibration]
+    paths:
+      - 'pipeline/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/validate-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Pipeline tests
+        run: python -m tests.test_pipeline
+      - name: Browser and ledger tests
+        run: |
+          node tests/test_ledger.mjs
+          node tests/test_sync.mjs
+          node tests/test_schedule.mjs
+          node tests/test_sim.mjs docs/data
+          node tests/test_sim_gate.mjs
+      - name: Configuration and runner tests
+        run: |
+          python -m tests.test_config
+          bash tests/test_build_runner.sh
