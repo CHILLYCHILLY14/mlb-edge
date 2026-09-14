@@ -62,6 +62,10 @@ def record(payload: dict) -> int:
         s = g["sim"]
         o = g.get("odds") or {}
         p_home = s.get("p_home_final", s["p_home"])
+        # Only the pre-calibration, pre-market simulation is eligible to train
+        # confidence calibration. Older history has no such snapshot and is
+        # deliberately excluded rather than reconstructed from blended output.
+        p_home_raw = s.get("p_raw_home")
         row.update({
             "gamePk": g["gamePk"], "date": g["date"], "start": g["start"],
             "away": g["away"], "home": g["home"],
@@ -83,6 +87,8 @@ def record(payload: dict) -> int:
             "updated_at": _now(),
             "status": row.get("status", "pending"),
         })
+        if p_home_raw is not None:
+            row["p_home_raw"] = round(float(p_home_raw), 4)
         row.setdefault("first_seen", _now())
         games[key] = row
         n += 1
@@ -245,44 +251,91 @@ def summary() -> dict:
 
 
 # ------------------------------------------------------------ calibration ---
-def calibration() -> dict:
-    """
-    Two bounded corrections learned from the model's own graded games.
-
-    `total_adj` is how many runs the projections have been off by on average -
-    if the model has been reading a run high all season, stop reading a run
-    high. `prob_scale` stretches or shrinks confidence in log-odds space: above
-    one means the model has been too timid, below one means too sure of itself.
-
-    Both are capped, both need a real sample before they do anything, and both
-    are published so the number on the page can always be traced.
-    """
-    db = _load()
-    rows = [r for r in db["games"].values() if r.get("status") == "graded"]
-    out = {"generated_at": _now(), "n": len(rows), "applied": False,
-           "total_adj": 0.0, "prob_scale": 1.0,
-           "min_games": C.CALIBRATION_MIN_GAMES, "enabled": C.CALIBRATION_ENABLED}
-    if not C.CALIBRATION_ENABLED or len(rows) < C.CALIBRATION_MIN_GAMES:
-        out["reason"] = (f"{len(rows)} graded of {C.CALIBRATION_MIN_GAMES} needed"
-                         if C.CALIBRATION_ENABLED else "disabled in config")
-        return out
-
-    bias = sum(r["err_total"] for r in rows) / len(rows)      # + means we ran high
-    out["total_adj"] = round(max(-C.CALIB_TOTAL_MAX, min(C.CALIB_TOTAL_MAX, -bias)), 3)
-
-    # one Newton step on the log-odds slope: y ~ sigmoid(scale * logit(p))
+def _fit_prob_scale(rows: list[dict]) -> float:
+    """Fit one bounded log-odds slope from independent model snapshots."""
     num = den = 0.0
     for r in rows:
-        p = min(max(r["p_home"], 1e-4), 1 - 1e-4)
+        p = min(max(float(r["p_home_raw"]), 1e-4), 1 - 1e-4)
         x = math.log(p / (1 - p))
         y = 1.0 if r["home_won"] else 0.0
         q = 1.0 / (1.0 + math.exp(-x))
         num += x * (y - q)
         den += x * x * q * (1 - q)
     scale = 1.0 + (num / den if den > 1e-9 else 0.0)
-    out["prob_scale"] = round(max(C.CALIB_PROB_MIN, min(C.CALIB_PROB_MAX, scale)), 4)
-    out["applied"] = True
-    out["measured_total_bias"] = round(bias, 3)
+    return max(C.CALIB_PROB_MIN, min(C.CALIB_PROB_MAX, scale))
+
+
+def _scaled_brier(rows: list[dict], scale: float) -> float:
+    if not rows:
+        return float("inf")
+    return sum(
+        (apply_prob_scale(float(r["p_home_raw"]), scale)
+         - (1.0 if r["home_won"] else 0.0)) ** 2
+        for r in rows
+    ) / len(rows)
+
+
+def calibration() -> dict:
+    """
+    Learn bounded corrections from the model's own graded games.
+
+    The run-total correction uses all graded residuals. Confidence scaling is
+    stricter: it trains only on stored, pre-calibration/pre-market simulation
+    snapshots and must improve a later chronological holdout before it can be
+    applied. This prevents the market blend from training the model correction
+    and prevents an in-sample improvement from being mistaken for validation.
+    """
+    db = _load()
+    rows = [r for r in db["games"].values() if r.get("status") == "graded"]
+    rows.sort(key=lambda r: (r.get("date", ""), r.get("gamePk", 0)))
+    raw_rows = [r for r in rows
+                if r.get("p_home_raw") is not None and r.get("home_won") is not None]
+    out = {"generated_at": _now(), "n": len(rows), "applied": False,
+           "total_adj": 0.0, "prob_scale": 1.0,
+           "probability_n": len(raw_rows), "probability_applied": False,
+           "min_games": C.CALIBRATION_MIN_GAMES, "enabled": C.CALIBRATION_ENABLED}
+    if not C.CALIBRATION_ENABLED or len(rows) < C.CALIBRATION_MIN_GAMES:
+        out["reason"] = (f"{len(rows)} graded of {C.CALIBRATION_MIN_GAMES} needed"
+                         if C.CALIBRATION_ENABLED else "disabled in config")
+        return out
+
+    bias_rows = [r for r in rows if r.get("err_total") is not None]
+    if bias_rows:
+        bias = sum(float(r["err_total"]) for r in bias_rows) / len(bias_rows)
+        out["total_adj"] = round(
+            max(-C.CALIB_TOTAL_MAX, min(C.CALIB_TOTAL_MAX, -bias)), 3)
+        out["measured_total_bias"] = round(bias, 3)
+        out["applied"] = True
+
+    if len(raw_rows) < C.CALIBRATION_MIN_GAMES:
+        out["probability_reason"] = (
+            f"{len(raw_rows)} independent snapshots of "
+            f"{C.CALIBRATION_MIN_GAMES} needed")
+        return out
+
+    validation_n = max(20, int(round(len(raw_rows) * 0.20)))
+    validation_n = min(validation_n, len(raw_rows) - 1)
+    training, validation = raw_rows[:-validation_n], raw_rows[-validation_n:]
+    candidate = _fit_prob_scale(training)
+    baseline_brier = _scaled_brier(validation, 1.0)
+    candidate_brier = _scaled_brier(validation, candidate)
+    improvement = baseline_brier - candidate_brier
+    out["probability_validation"] = {
+        "training_n": len(training),
+        "holdout_n": len(validation),
+        "candidate_scale": round(candidate, 4),
+        "baseline_brier": round(baseline_brier, 4),
+        "candidate_brier": round(candidate_brier, 4),
+        "improvement": round(improvement, 4),
+    }
+    # Ignore changes smaller than one Brier point in ten thousand. At this
+    # sample size they are noise, not evidence that a correction will travel.
+    if improvement > 0.0001:
+        out["prob_scale"] = round(candidate, 4)
+        out["probability_applied"] = True
+        out["applied"] = True
+    else:
+        out["probability_reason"] = "candidate did not improve the chronological holdout"
     return out
 
 

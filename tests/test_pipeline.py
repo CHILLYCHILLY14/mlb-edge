@@ -162,6 +162,14 @@ def test_junk_prices():
     real = _bet("ML", "NYY", "NYY ML", -110, 0.60, 0.50, 0.4, C.EDGE_CEILING, ctx)
     check("a real price still prices", real is not None and real["price"] == -110)
 
+    bad_fill = _bet("ML", "NYY", "NYY ML", -250, 0.65, 0.50,
+                    0.4, C.EDGE_CEILING, ctx)
+    check("model edge cannot qualify at a negative-EV offered price",
+          bad_fill["edge"] > C.TIER_LEAN
+          and bad_fill["qualification_edge"] < 0
+          and bad_fill["tier"] == "PASS"
+          and bad_fill["stake"] == 0.0)
+
 
 def test_no_invented_prices():
     """
@@ -256,6 +264,57 @@ def test_no_invented_prices():
               str(con2["rl_away"]))
     finally:
         C.PREFERRED_BOOK = saved
+
+
+def test_calibration_validation():
+    """Confidence corrections use independent snapshots and a later holdout."""
+    print("\n[calibration validation]")
+    import pipeline.predict as PR
+
+    def history(holdout_matches_model=False, include_raw=True):
+        games = {}
+        for i in range(200):
+            high = i % 2 == 0
+            j = (i // 2) % 10
+            if i >= 160 and holdout_matches_model:
+                won = j < (8 if high else 2)
+            else:
+                won = j < (6 if high else 4)
+            row = {
+                "status": "graded", "date": "2026-01-01", "gamePk": i,
+                "home_won": won, "err_total": 0.0,
+            }
+            if include_raw:
+                row["p_home_raw"] = 0.8 if high else 0.2
+            games[str(i)] = row
+        return {"games": games}
+
+    saved_load = PR._load
+    try:
+        PR._load = lambda: history()
+        accepted = PR.calibration()
+        val = accepted.get("probability_validation") or {}
+        check("an out-of-sample improvement can calibrate confidence",
+              accepted["probability_applied"]
+              and accepted["prob_scale"] < 1.0
+              and val.get("candidate_brier", 1) < val.get("baseline_brier", 0))
+
+        PR._load = lambda: history(holdout_matches_model=True)
+        rejected = PR.calibration()
+        val = rejected.get("probability_validation") or {}
+        check("an in-sample-only correction is rejected",
+              not rejected["probability_applied"]
+              and rejected["prob_scale"] == 1.0
+              and val.get("candidate_brier", 0) >= val.get("baseline_brier", 1))
+
+        PR._load = lambda: history(include_raw=False)
+        legacy = PR.calibration()
+        check("market-blended legacy rows cannot train confidence calibration",
+              legacy["probability_n"] == 0
+              and not legacy["probability_applied"]
+              and legacy["prob_scale"] == 1.0)
+    finally:
+        PR._load = saved_load
 
 
 def test_weather_model():
@@ -622,6 +681,9 @@ def test_full_build():
     check("calibration corrections stay inside their bounds",
           abs(cal["total_adj"]) <= C.CALIB_TOTAL_MAX
           and C.CALIB_PROB_MIN <= cal["prob_scale"] <= C.CALIB_PROB_MAX)
+    recorded = list(PR._load()["games"].values())
+    check("prediction history stores the independent model probability",
+          recorded and all(r.get("p_home_raw") is not None for r in recorded))
 
     print("\n[bad upstream data]")
     from pipeline.model.rates import blend_windows, split_vector, LEAGUE_FALLBACK
@@ -644,6 +706,7 @@ if __name__ == "__main__":
     test_no_invented_prices()
     test_weather_model()
     test_full_build()
+    test_calibration_validation()
     print("\n" + ("=" * 60))
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S):")
