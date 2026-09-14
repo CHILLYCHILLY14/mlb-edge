@@ -32,7 +32,9 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
     # differ. Tiering on it made every game look like a play and set the
     # divergence flag off on half the slate.
     #
-    # So: qualify on the model edge, size on the realized one.
+    # A recommendation has to clear both tests: it must disagree with the
+    # consensus and still have positive value at the price the user can take.
+    # The weaker of those edges controls both qualification and sizing.
     e_real = raw_edge(p_final, price)
     e_real_c = compress(e_real, ceiling)
     if p_market is not None and p_market > 0:
@@ -42,8 +44,9 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
     e_c = compress(e_model, ceiling)
     e_price = round(e_real_c - e_c, 4)
 
-    stake, kf = kelly_stake(min(e_c, e_real_c), price, C.BANKROLL)
-    tier = tier_for(e_c)
+    qualification_edge = min(e_c, e_real_c)
+    stake, kf = kelly_stake(qualification_edge, price, C.BANKROLL)
+    tier = tier_for(qualification_edge)
     fails = []
     if tier == "BEST BET":
         fails = lock_rules(price=price, p_model=p_final, p_market=p_market,
@@ -72,6 +75,8 @@ def _bet(market, selection, label, price, p_model, p_market, blend_w, ceiling,
         "edge_pct": round(e_c * 100, 2),
         "edge_real": round(e_real_c, 4), "edge_real_pct": round(e_real_c * 100, 2),
         "edge_price": e_price, "edge_price_pct": round(e_price * 100, 2),
+        "qualification_edge": round(qualification_edge, 4),
+        "qualification_edge_pct": round(qualification_edge * 100, 2),
         "tier": tier, "stake": round(stake, 2), "kelly": round(kf, 4),
         "to_win": round(stake * (american_to_decimal(price) - 1.0), 2),
         "lock_fails": fails,
