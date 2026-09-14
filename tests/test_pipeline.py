@@ -704,9 +704,9 @@ if __name__ == "__main__":
     test_market_math()
     test_junk_prices()
     test_no_invented_prices()
-    test_calibration_validation()
     test_weather_model()
     test_full_build()
+    test_calibration_validation()
     print("\n" + ("=" * 60))
     if FAILS:
         print(f"{len(FAILS)} FAILURE(S):")
