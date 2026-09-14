@@ -2,7 +2,7 @@ name: Build MLB slate
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/qualification-calibration]
     paths:
       - '.github/workflows/build.yml'
       - 'pipeline/**'
